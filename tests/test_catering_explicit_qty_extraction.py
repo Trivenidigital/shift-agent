@@ -102,6 +102,72 @@ def test_repeated_item_quantities_are_summed():
     assert _pairs(result) == [("Upma", 8)]
 
 
+# ── M1: removal / negation / replacement never finalizes the opposite ────────
+@pytest.mark.parametrize("text", [
+    "cancel 10 Idly",
+    "remove the 10 Idly please",
+    "drop 20 Upma",
+    "without 5 Pongal",
+    "minus 5 Pongal",
+    "Instead of 10 Idly, 5 Masala Dosa",
+    "not 10 Idly, 5 Idly",
+    "No Idly x 10",
+    "the confirmed 5 Pongal thing",
+])
+def test_removal_or_unexplained_lead_in_makes_the_whole_message_non_explicit(text):
+    result = extract_explicit_line_items(text, MENU_NAMES)
+    assert result.matched == [] and result.unmatched == [], result
+    assert result.has_quantity_signal is False
+
+
+# ── M3: additions are amendments, not a whole new order ──────────────────────
+@pytest.mark.parametrize("text", ["Can we also add 4 Pongal?", "add 4 Pongal",
+                                  "get 4 more Pongal", "4 more Pongal please"])
+def test_addition_phrasing_is_not_an_explicit_order(text):
+    assert extract_explicit_line_items(text, MENU_NAMES).matched == []
+
+
+@pytest.mark.parametrize("text", ["Can we have 10 trays of Idly",
+                                  "We would like to order 10 trays of Idly",
+                                  "hi, I'd like 10 trays of Idly"])
+def test_plain_lead_ins_still_read_as_an_order(text):
+    assert _pairs(extract_explicit_line_items(text, MENU_NAMES)) == [("Idly (3 PCS)", 10)]
+
+
+# ── M5: one generic word / a numbered fragment never infers an item ──────────
+@pytest.mark.parametrize("text", ["40 veg", "60 of us want Masala Dosa", "30 non-veg"])
+def test_headcount_and_dietary_phrases_are_never_items(text):
+    result = extract_explicit_line_items(text, MENU_NAMES)
+    assert result.matched == [] and result.unmatched == [], result
+
+
+@pytest.mark.parametrize("text,wrong", [("3 Paneer", "Paneer Butter Masala"),
+                                        ("2 Chicken 65", "Chicken 65 Dosa"),
+                                        ("5 Goat", "Goat Curry")])
+def test_generic_or_numbered_fragment_is_unmatched_not_inferred(text, wrong):
+    result = extract_explicit_line_items(text, MENU_NAMES)
+    assert result.matched == [], f"{text!r} was inferred as {result.matched}"
+    assert result.unmatched == [text]
+    assert wrong in MENU_NAMES
+
+
+def test_substantial_two_word_containment_still_matches():
+    # "Tikka Masala" covers 2 of "Paneer Tikka Masala"'s 3 words, and is unique.
+    assert _pairs(extract_explicit_line_items("3 Tikka Masala", MENU_NAMES)) == [
+        ("Paneer Tikka Masala", 3)]
+
+
+# ── L3: the clarification renders only menu words, never the raw phrase ─────
+def test_display_keeps_only_menu_words_and_the_quantity():
+    result = extract_explicit_line_items("10 trays of Idly, 5 confirmed paid Pongal thing",
+                                         MENU_NAMES)
+    raw = "5 confirmed paid Pongal thing"
+    assert result.unmatched == [raw]
+    assert result.display[raw] == "5 x pongal"
+    other = extract_explicit_line_items("10 trays of Idly, 3 trays of lasagna", MENU_NAMES)
+    assert other.display["3 trays of lasagna"] == "3 x that item"
+
+
 def test_empty_menu_or_text_is_inert():
     assert extract_explicit_line_items("", MENU_NAMES).has_quantity_signal is False
     assert extract_explicit_line_items("10 trays of Idly", []).matched == []

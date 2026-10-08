@@ -953,10 +953,16 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
 # GOVERNANCE (catering-studio directive, "probabilistic vs deterministic"): how a
 # customer's PHRASE is read may be heuristic — that is menu-item name
 # interpretation. What it MAPS TO may not be: a phrase resolves to a canonical
-# menu name only by exact normalized equality or a UNIQUE token-containment
-# match; anything else comes back unmatched, with suggestions, for the customer
-# to confirm. No price is read or produced here — every cent is
+# menu name only by exact normalized equality or a UNIQUE, substantial
+# token-containment match; anything else comes back unmatched, with suggestions,
+# for the customer to confirm. No price is read or produced here — every cent is
 # catering_pricing.compute_quote's, downstream.
+#
+# FAIL TOWARD "NOT EXPLICIT". finalize REPLACES the lead's whole selection, so a
+# misread is a wrong order, not a typo. Any removal / negation / addition word
+# ("cancel 10 Idly", "instead of", "also add 4 Pongal") or any unexplained word
+# before a quantity makes the WHOLE message non-explicit (empty result): the
+# existing amendment path keeps it, and nothing is guessed.
 EXPLICIT_QTY_MIN = 1
 EXPLICIT_QTY_MAX = 200
 EXPLICIT_QTY_MAX_SUGGESTIONS = 3
@@ -967,7 +973,7 @@ _QTY_TRAILING_FILLER_RE = re.compile(
     r"(?:[\s.!?]|\b(?:please|pls|plz|thanks|thank\s+you|thx)\b)+$", re.IGNORECASE)
 # "10 trays of Idly", "4 x Masala Dosa", "4× Masala Dosa", "I'll take 2 trays of Idly"
 _QTY_BEFORE_NAME_RE = re.compile(
-    rf"^(?:.*?\s)??(?P<qty>\d{{1,4}})\s*(?P<x>[x×](?![a-z]))?\s*(?P<unit>{_QTY_UNIT}\b)?"
+    rf"^(?P<prefix>(?:.*?\s)??)(?P<qty>\d{{1,4}})\s*(?P<x>[x×](?![a-z]))?\s*(?P<unit>{_QTY_UNIT}\b)?"
     r"\s*(?P<of>of\b)?\s*(?P<name>[^\d\s].*)$",
     re.IGNORECASE,
 )
@@ -978,30 +984,53 @@ _NAME_BEFORE_QTY_RE = re.compile(
 )
 _PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
 _NON_WORD_RE = re.compile(r"[^\w\s]+")
-# Trimmed from the EDGES of a phrase only ("I'll take ... please"), never from
-# inside it, so a menu name is never shortened.
+# The ONLY words allowed before a quantity ("I'll take 2 trays of Idly", "can we
+# have 10 Idly"). Deliberately excludes add / also / get / more: "can we also add
+# 4 Pongal" is an amendment to an existing order, not the whole new order.
+_QTY_LEAD_INS = frozenset({
+    "i", "ll", "d", "we", "you", "me", "us", "the", "a", "an", "take", "want",
+    "need", "like", "would", "could", "can", "will", "have", "give", "send",
+    "order", "book", "do", "to", "please", "pls", "plz", "ok", "okay", "yes",
+    "so", "let", "lets", "s", "just", "hi", "hello",
+})
+# Removal / negation / addition anywhere in the message => not an explicit order.
+_NON_EXPLICIT_TOKENS = frozenset({
+    "no", "not", "don", "dont", "cancel", "remove", "delete", "drop", "without",
+    "minus", "instead", "except", "less", "fewer", "reduce", "skip", "nothing",
+    "add", "also", "more", "another", "additional", "plus",
+})
+# Trimmed from the EDGES of a phrase only ("... please"), never from inside it,
+# so a menu name is never shortened.
 _PHRASE_EDGE_STOPWORDS = frozenset({
     "a", "an", "the", "of", "i", "ll", "we", "you", "me", "us", "take", "want",
-    "need", "get", "add", "give", "have", "like", "would", "could", "can", "also",
-    "just", "please", "pls", "plz", "thanks", "thank",
+    "need", "give", "have", "like", "would", "could", "can", "just", "please",
+    "pls", "plz", "thanks", "thank",
 })
-# A count of PEOPLE is the headcount, not an item — never an item phrase.
+# A count of PEOPLE is the headcount, not an item — a phrase naming one is never
+# an item phrase ("60 of us want Masala Dosa" is 60 guests, not 60 dosas).
 _HEADCOUNT_NOUNS = frozenset({
     "people", "person", "persons", "guest", "guests", "pax", "ppl", "attendees",
-    "heads", "members", "adults", "kids", "children", "folks",
+    "heads", "members", "adults", "kids", "children", "folks", "us",
 })
+# A phrase made ONLY of these is a dietary split ("40 veg"), never an item.
+_DIETARY_WORDS = frozenset({"veg", "non", "nonveg", "vegetarian", "jain", "vegan"})
 
 
 @dataclass(frozen=True)
 class ExplicitLineItems:
     """Result of `extract_explicit_line_items`. `matched` rows are
     {"name": canonical menu name, "qty": int}; `unmatched` holds the customer's
-    raw phrases; `suggestions` maps each unmatched phrase to up to
-    EXPLICIT_QTY_MAX_SUGGESTIONS exact menu names (possibly none)."""
+    raw phrases (keys only — never echo them back); `suggestions` maps each
+    unmatched phrase to up to EXPLICIT_QTY_MAX_SUGGESTIONS exact menu names
+    (possibly none); `display` maps it to a SAFE rendering built only from the
+    quantity and the phrase's words that occur in some menu name ("5 x biryani",
+    "3 x that item"), so a customer's own words ("confirmed", "paid") are never
+    sent back through the outbound screens."""
     matched: list = field(default_factory=list)
     unmatched: list = field(default_factory=list)
     has_quantity_signal: bool = False
     suggestions: dict = field(default_factory=dict)
+    display: dict = field(default_factory=dict)
 
 
 def _item_tokens(name: str, *, keep_parenthetical: bool) -> tuple:
@@ -1022,11 +1051,21 @@ def _trim_phrase_edges(tokens: tuple) -> tuple:
 
 def _resolve_item_phrase(full: tuple, stripped: tuple, keys: list) -> Optional[str]:
     """Most specific tier first; a tier that hits MORE than one item is ambiguous
-    and stops the search (a looser tier can only be more ambiguous)."""
+    and stops the search (a looser tier can only be more ambiguous).
+
+    Tier 3 (containment) only for a SUBSTANTIAL phrase: at least two words,
+    covering at least half the item's words, and not ending in a number — a lone
+    generic word ("3 Paneer") or a numbered fragment ("2 Chicken 65") must be
+    named exactly, never inferred."""
+    def _contains(k) -> bool:
+        return (len(stripped) >= 2
+                and not stripped[-1].isdigit()
+                and set(stripped) <= set(k[2])
+                and 2 * len(stripped) >= len(k[2]))
     tiers = (
         lambda k: k[1] == full,
         lambda k: k[2] == stripped,
-        lambda k: set(stripped) <= set(k[2]),
+        _contains,
     )
     for hit in tiers:
         names = [k[0] for k in keys if hit(k)]
@@ -1046,69 +1085,102 @@ def _suggest_menu_names(stripped: tuple, keys: list) -> list:
     return [name for _score, _index, name in sorted(scored)[:EXPLICIT_QTY_MAX_SUGGESTIONS]]
 
 
+def _safe_display(qty: int, stripped: tuple, menu_words: set) -> str:
+    words = " ".join(tok for tok in stripped if tok in menu_words)
+    return f"{qty} x {words or 'that item'}"
+
+
 def extract_explicit_line_items(text: str, menu_names) -> ExplicitLineItems:
     """Explicit per-item quantities in `text`, resolved against `menu_names`.
 
     PURE and deterministic. Segments split on `,` `;` newline ` and ` ` & `; each
     segment is read as `N [x|×] [unit] [of] NAME` or `NAME (x|×|-|:) N [unit]`.
-    A segment whose name is a headcount noun ("50 people") or carries no letters
-    is not an item phrase. A phrase that resolves to no single menu item is
-    reported unmatched only when it is plainly an item phrase — it carried a
-    unit / multiplier / "of", or shares a word with a menu name — so a stray
-    number ("at 7 pm") never triggers a clarification. A bare number alone
-    ("Option 2") is never a quantity signal. Quantities outside
-    EXPLICIT_QTY_MIN..EXPLICIT_QTY_MAX are unmatched, never clamped. Repeated
-    items are summed.
+    A segment whose name is a headcount noun ("50 people"), only dietary words
+    ("40 veg") or carries no letters is not an item phrase. A phrase that
+    resolves to no single menu item is reported unmatched only when it is
+    plainly an item phrase — it carried a unit / multiplier / "of", or shares a
+    word with a menu name — so a stray number ("at 7 pm") never triggers a
+    clarification. A bare number alone ("Option 2") is never a quantity signal.
+    Quantities outside EXPLICIT_QTY_MIN..EXPLICIT_QTY_MAX are unmatched, never
+    clamped. Repeated items are summed.
+
+    The WHOLE message is non-explicit (empty result) when it contains a removal /
+    negation / addition word, or when an item phrase is preceded by any word
+    outside the short lead-in list — see the module note above.
+
+    Known, deliberately unhandled (documented for the caller):
+      * L2 — no per-ORDER cap beyond the per-line bound: the owner sees every
+        line on the approval card before anything reaches the customer;
+      * L4 — "Option 2, and 10 trays of Idly" yields only the trays: the option
+        number is not an item, and the customer's ack lists exactly what was taken.
     """
     keys = [
         (name, _item_tokens(name, keep_parenthetical=True), _item_tokens(name, keep_parenthetical=False))
         for name in dict.fromkeys(menu_names or [])
     ]
+    menu_words = {tok for _name, _full, stripped in keys for tok in stripped}
+    message_words = set(_item_tokens(text, keep_parenthetical=True))
+    if (message_words & _NON_EXPLICIT_TOKENS) - menu_words:
+        return ExplicitLineItems()
     totals: dict = {}
     raws: dict = {}
     unmatched: list = []
     suggestions: dict = {}
+    display: dict = {}
     for segment in _QTY_SEGMENT_SPLIT_RE.split(text or ""):
         raw = _QTY_TRAILING_FILLER_RE.sub("", segment.strip()).strip()
         if not raw:
             continue
+        prefix = ""
         m = _NAME_BEFORE_QTY_RE.match(raw)
         marked = bool(m and (m.group("sep").strip() in {"x", "X", "×"} or m.group("unit")))
         if m is None:
             m = _QTY_BEFORE_NAME_RE.match(raw)
             marked = bool(m and (m.group("x") or m.group("unit") or m.group("of")))
+            prefix = m.group("prefix") if m else ""
         if m is None:
             continue
         full = _trim_phrase_edges(_item_tokens(m.group("name"), keep_parenthetical=True))
         stripped = _trim_phrase_edges(_item_tokens(m.group("name"), keep_parenthetical=False))
         if not any(any(c.isalpha() for c in tok) for tok in stripped):
             continue
-        if _HEADCOUNT_NOUNS & set(stripped):
+        # Headcount nouns are checked BEFORE edge trimming: "us" is also a lead-in.
+        untrimmed = _item_tokens(m.group("name"), keep_parenthetical=False)
+        if _HEADCOUNT_NOUNS & set(untrimmed) or set(stripped) <= _DIETARY_WORDS:
             continue
         qty = int(m.group("qty"))
         name = _resolve_item_phrase(full, stripped, keys)
+        nearest = [] if name is not None else _suggest_menu_names(stripped, keys)
+        if name is None and not (marked or nearest):
+            continue
+        # An item phrase with an unexplained word before its quantity ("instead
+        # of", "the confirmed") — do not guess what it does to the order.
+        if any(tok not in _QTY_LEAD_INS for tok in _item_tokens(prefix, keep_parenthetical=True)):
+            return ExplicitLineItems()
         if name is not None:
             totals[name] = totals.get(name, 0) + qty
-            raws.setdefault(name, []).append(raw)
+            raws.setdefault(name, []).append((raw, qty))
             continue
-        nearest = _suggest_menu_names(stripped, keys)
-        if marked or nearest:
-            unmatched.append(raw)
-            suggestions[raw] = nearest
+        unmatched.append(raw)
+        suggestions[raw] = nearest
+        display[raw] = _safe_display(qty, stripped, menu_words)
 
     matched = []
     for name, qty in totals.items():
         if EXPLICIT_QTY_MIN <= qty <= EXPLICIT_QTY_MAX:
             matched.append({"name": name, "qty": qty})
         else:
-            for raw in raws[name]:
+            for raw, line_qty in raws[name]:
                 unmatched.append(raw)
                 suggestions[raw] = [name]
+                display[raw] = _safe_display(
+                    line_qty, _item_tokens(name, keep_parenthetical=False), menu_words)
     return ExplicitLineItems(
         matched=matched,
         unmatched=unmatched,
         has_quantity_signal=bool(matched or unmatched),
         suggestions=suggestions,
+        display=display,
     )
 
 

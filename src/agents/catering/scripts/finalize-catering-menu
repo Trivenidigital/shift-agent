@@ -382,8 +382,23 @@ def _render_owner_card(
         quote_version_line = f"Quote version {quote_version}\n"
         if quote_diff_line:
             quote_version_line += f"Changes since v{quote_version - 1}: {quote_diff_line}\n"
+    # Line amounts from the kernel's cents when this card describes a fresh
+    # computation: whole-dollar unit × qty drifts (200 × $8.50 rendered $1800 vs
+    # the true $1,700.00), and the lines then stop adding up to the cents total.
+    # A replay (qc=None) keeps the persisted whole-dollar rows it always showed.
+    unit_cents_by_name = {
+        ln.name: ln.unit_cents for ln in (qc.lines if qc is not None else [])
+        if ln.unit_cents is not None
+    }
+
+    def _line_amount(name: str, qty: int, price: int) -> str:
+        cents = unit_cents_by_name.get(name)
+        if cents is None:
+            return f"${qty * price}"
+        return _pricing.format_cents(qty * cents)
+
     items_section = "\n".join(
-        f"  - {name} × {qty}  ${qty * price}"
+        f"  - {name} × {qty}  {_line_amount(name, qty, price)}"
         for name, qty, price in items_with_prices
     )
     drift_note = (

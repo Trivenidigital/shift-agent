@@ -147,15 +147,37 @@ def f7_acceptance_arm_enabled() -> bool:
     return os.environ.get(CATERING_ACCEPTANCE_ARM_ENV, "0") == "1"
 
 
-# F7 EXPLICIT-QUANTITY ARM — see _try_explicit_qty_intercept. Default "1", but it
-# is ALSO gated per sender by the automation-control allowlist
-# (automation_control.enabled), so it only reaches allowlisted chats. "0" is the
-# kill switch: routing is then byte-identical to before the arm existed.
-CATERING_EXPLICIT_QTY_ENV = "CATERING_EXPLICIT_QTY_ENABLED"
+# F7 EXPLICIT-QUANTITY ARM — see _try_explicit_qty_intercept. Its OWN allowlist
+# (not coupled to the automation-control kernel's): comma-separated E.164 phones
+# and/or chat ids, "*" = every sender, unset/empty = the arm is OFF and routing is
+# byte-identical to before it existed. Read at call time. Entries are normalized
+# with automation_control.canonical_key — the same identity key the
+# automation-control allowlist compares on.
+CATERING_EXPLICIT_QTY_ALLOWLIST_ENV = "CATERING_EXPLICIT_QTY_ALLOWLIST"
 
 
-def f7_explicit_qty_enabled() -> bool:
-    return os.environ.get(CATERING_EXPLICIT_QTY_ENV, "1") == "1"
+def _explicit_qty_allowlist() -> list[str]:
+    return [p.strip() for p in os.environ.get(CATERING_EXPLICIT_QTY_ALLOWLIST_ENV, "").split(",")
+            if p.strip()]
+
+
+def _explicit_qty_allowlisted(chat_id: str, phone: Optional[str] = None) -> bool:
+    """True when this sender may use the explicit-quantity arm. Fail-closed."""
+    try:
+        raw = _explicit_qty_allowlist()
+        if not raw:
+            return False
+        if "*" in raw:
+            return True
+        allow = {automation_control.canonical_key(e) for e in raw}
+        allow.discard("")
+        mine = {automation_control.canonical_key(chat_id)}
+        if phone:
+            mine.add(automation_control.canonical_key(chat_id, phone))
+        mine.discard("")
+        return bool(mine & allow)
+    except Exception:  # noqa: BLE001 — a broken gate is a closed gate
+        return False
 
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
@@ -7185,11 +7207,6 @@ def _sender_has_qualifying_lead(chat_id: str) -> bool:
         return False
 
 
-def _explicit_qty_gate_open(chat_id: str) -> bool:
-    """Kill switch AND the automation-control allowlist (no allowlist of its own)."""
-    return f7_explicit_qty_enabled() and automation_control.enabled(chat_id)
-
-
 def _sender_has_explicit_qty_lead(chat_id: str, text: str) -> bool:
     """Admission for "10 trays of Idly, 4 Masala Dosa": item counts carry no
     catering signal, so admit when the sender's open lead can still be finalized
@@ -7197,13 +7214,13 @@ def _sender_has_explicit_qty_lead(chat_id: str, text: str) -> bool:
     first (env, one menu read) before identity resolution spawns identify-sender.
     Never raises."""
     try:
-        if not _explicit_qty_gate_open(chat_id):
+        if not _explicit_qty_allowlist():
             return False
         extraction = actions.extract_explicit_line_items_from_menu(text)
         if extraction is None or not extraction.matched:
             return False
         phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-        if role == "owner":
+        if role == "owner" or not _explicit_qty_allowlisted(chat_id, phone):
             return False
         lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
         return bool(lead) and lead.get("status") in actions.FINALIZE_ELIGIBLE_LEAD_STATUSES
@@ -7526,13 +7543,17 @@ def _explicit_qty_ack_text(matched: list[dict]) -> str:
 
 
 def _explicit_qty_clarification_text(extraction: Any) -> str:
+    """Never echoes the customer's raw phrase (it could carry "confirmed" /
+    "paid" into the outbound screens): only `extraction.display` — the quantity
+    plus the phrase's words that occur in some menu name — and exact menu names."""
     lines = ["I couldn't match these to our menu:"]
     for phrase in extraction.unmatched:
+        shown = extraction.display.get(phrase) or "that item"
         options = extraction.suggestions.get(phrase) or []
         if options:
-            lines.append(f'- "{phrase}" - did you mean: {", ".join(options)}?')
+            lines.append(f"- {shown} - did you mean: {', '.join(options)}?")
         else:
-            lines.append(f'- "{phrase}"')
+            lines.append(f"- {shown}")
     lines.append(
         f"Please reply with the exact menu names and quantities "
         f"({catering_extraction.EXPLICIT_QTY_MIN}-{catering_extraction.EXPLICIT_QTY_MAX} "
@@ -7540,26 +7561,46 @@ def _explicit_qty_clarification_text(extraction: Any) -> str:
     return "\n".join(lines)
 
 
+# Statuses the arm FINALIZES from. CUSTOMER_FINALIZED is answered but not
+# re-finalized: the owner may be approving v1 while a new text would persist v2.
+_EXPLICIT_QTY_FINALIZE_FROM = frozenset({"AWAITING_OWNER_APPROVAL", "OWNER_EDITED"})
+
+
 def _try_explicit_qty_intercept(
     text: str, chat_id: str, event: Any, *, active_lead: dict, message_id: str,
+    phone: Optional[str] = None,
 ) -> Optional[dict]:
     """A customer with a finalize-eligible lead names items AND counts.
 
-    Every pair matched + headcount known + the kernel says deliverable → invoke
-    finalize-catering-menu with the customer's quantities verbatim (it re-prices,
-    persists CUSTOMER_FINALIZED and sends the owner card), then acknowledge the
-    customer. Some phrases unmatched → ONE clarification naming them with up to
-    three exact menu names each; no state change. Headcount missing, no
-    pricebook, an undeliverable quote, or finalize exiting non-zero → None so the
-    existing path handles the inbound (nothing new sent to the customer).
+    Returns None (existing routing, unchanged) ONLY when the arm does not engage:
+    sender not on CATERING_EXPLICIT_QTY_ALLOWLIST, lead not finalize-eligible, or
+    no menu item named with a quantity. Once ≥1 item matched, the turn is ALWAYS
+    handled here — the option-selection arm after this one reads "I'll take 2
+    trays of Idly" as Option 2, so it must never see this message:
+
+      * some phrases unmatched → ONE clarification (exact menu names, never the
+        raw phrase); no state change;
+      * lead CUSTOMER_FINALIZED → canonical "with the owner" reply, no
+        re-finalize (closes the owner-approves-v1-while-v2-persists race);
+      * headcount missing / no pricebook / quote not deliverable / finalize
+        exiting anything but 0 or 6 → canonical reply; finalize 124 / 1 (outcome
+        unknown — it may have persisted) also pages the operator;
+      * all matched, headcount known, deliverable → finalize-catering-menu with
+        the customer's quantities verbatim (it re-prices, persists
+        CUSTOMER_FINALIZED, sends the owner card), then the customer's ack.
 
     Audit: `cf_router_intercepted` under the EXISTING `f7_proposal_selection`
-    reason (the Literal is not widened); the detail starts `explicit_qty`.
+    reason (the Literal is not widened), detail starting `explicit_qty`.
+
+    Known residuals: no per-order cap beyond 1..200 per line (the owner sees the
+    card first); "Option 2, and 10 trays of Idly" finalizes only the trays (the
+    ack lists them); a lead's SENT proposal set stays SENT — the
+    CUSTOMER_FINALIZED rule above stops a later re-finalize from this arm.
     The caller has already returned None for the owner.
     """
     if active_lead.get("status") not in actions.FINALIZE_ELIGIBLE_LEAD_STATUSES:
         return None
-    if not _explicit_qty_gate_open(chat_id):
+    if not _explicit_qty_allowlisted(chat_id, phone):
         return None
     extraction = actions.extract_explicit_line_items_from_menu(text)
     if extraction is None or not extraction.matched:
@@ -7577,24 +7618,33 @@ def _try_explicit_qty_intercept(
                     f"active {lead_id}; {outcome}"),
         )
 
+    def _canonical(outcome: str, rc: Optional[int] = None) -> dict:
+        reply_sent = False
+        if F7_PRIMARY_FOLLOWUP_REPLY:
+            reply_sent = actions.send_canonical_followup_reply(chat_id, lead_id, native_id)
+        _audit(f"{outcome} canonical_reply_sent={reply_sent}", rc)
+        return {"action": "skip",
+                "reason": f"cf-router F7 explicit quantities: canonical reply for {lead_id}"}
+
     if extraction.unmatched:
         sent = actions.send_catering_customer_text(
             chat_id, lead_id, _explicit_qty_clarification_text(extraction), native_id)
-        _audit(f"clarification_sent={sent} phrases={extraction.unmatched!r}")
+        if not sent:
+            return _canonical("clarification_send_failed")
+        _audit(f"clarification_sent=True unmatched_shown={list(extraction.display.values())!r}")
         return {"action": "skip",
                 "reason": f"cf-router F7 explicit quantities: clarification for {lead_id}"}
 
+    if active_lead.get("status") not in _EXPLICIT_QTY_FINALIZE_FROM:
+        return _canonical(f"not_refinalized status={active_lead.get('status')}")
     headcount = (active_lead.get("extracted") or {}).get("headcount")
     if not isinstance(headcount, int) or headcount < 1:
-        _audit("fallthrough=headcount_missing")
-        return None
-    qc = actions.price_explicit_line_items(extraction.matched, headcount)
+        return _canonical("headcount_missing")
+    qc, why = actions.price_explicit_line_items(extraction.matched, headcount)
     if qc is None:
-        _audit("fallthrough=pricing_unavailable")
-        return None
+        return _canonical(f"pricing_unavailable cause={why}")
     if not qc.is_deliverable():
-        _audit(f"fallthrough=not_deliverable price_status={qc.price_status} flags={qc.flags}")
-        return None
+        return _canonical(f"not_deliverable price_status={qc.price_status} flags={qc.flags}")
 
     items = [{"name": ln.name, "qty": ln.qty,
               "price_usd": catering_pricing.cents_to_whole_dollars(ln.unit_cents)}
@@ -7605,10 +7655,24 @@ def _try_explicit_qty_intercept(
         qc.items_subtotal_cents + qc.per_person_subtotal_cents)
     rc, payload = actions.invoke_finalize_selected_items(code, message_id, items, guard_total)
     if rc not in {0, 6}:
-        # 6 = state persisted but the owner card failed (finalize pages the owner
-        # itself). Anything else changed nothing the customer should hear about.
-        _audit(f"finalize_rc={rc} total_cents={qc.total_cents}", rc)
-        return None
+        # (6 = state persisted but the owner card failed; finalize pages the
+        # owner itself.) 124 (timeout) / 1 (spawn error) leave the outcome
+        # UNKNOWN — finalize may already have persisted CUSTOMER_FINALIZED — so a
+        # human is paged, mirroring select-catering-proposal's
+        # _notify_owner_card_failed (priority 2, title + plain-text body).
+        paged = rc in {1, 124}
+        if paged:
+            actions.fire_pushover_alert(
+                f"Catering finalize unconfirmed (lead {lead_id})",
+                (f"Catering lead {lead_id} ({code}): the customer's explicit item "
+                 f"quantities were sent to finalize-catering-menu and it did not "
+                 f"report back (rc={rc}). The lead may or may not be "
+                 f"CUSTOMER_FINALIZED, and the owner card may not have been sent. "
+                 f"Check the lead before approving."),
+                priority=2,
+            )
+        return _canonical(f"finalize_rc={rc} total_cents={qc.total_cents} "
+                          f"handled_failure=True owner_paged={paged}", rc)
     replay = bool(payload.get("replay"))
     ack_sent = False
     if not replay:
@@ -7694,6 +7758,7 @@ def _try_f7_primary_intercept(
     # file the order as an amendment. Gated off => None => unchanged routing.
     explicit_result = _try_explicit_qty_intercept(
         text, chat_id, event, active_lead=active_lead, message_id=message_id,
+        phone=phone,
     )
     if explicit_result is not None:
         return explicit_result

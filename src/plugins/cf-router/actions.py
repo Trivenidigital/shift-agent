@@ -1187,8 +1187,9 @@ def extract_explicit_line_items_from_menu(text: str):
 def price_explicit_line_items(matched: list[dict], guest_count: int):
     """Price the matched (name, qty) pairs through THE kernel
     (catering_pricing.compute_quote: pricebook override first, else menu price).
-    Returns the QuoteComputation, or None when no pricebook exists or the
-    menu / pricebook / kernel refuses. Never raises, never guesses."""
+    Returns (QuoteComputation, "") or (None, why) — why is "no_pricebook",
+    "menu_load_status=<status>" or the exception class name (PricingError, a
+    pricebook/menu load error, ...). Never raises, never guesses."""
     try:
         _ensure_platform_path()
         import catering_pricing  # type: ignore
@@ -1196,17 +1197,17 @@ def price_explicit_line_items(matched: list[dict], guest_count: int):
         from schemas import Menu  # type: ignore
         menu, status = load_model(MENU_PATH, Menu)
         if status != "ok":
-            return None
+            return None, f"menu_load_status={status}"
         pricebook = catering_pricing.load_pricebook(PRICEBOOK_PATH)
         if pricebook is None:
-            return None
+            return None, "no_pricebook"
         return catering_pricing.compute_quote(
             guest_count, None,
             [(row["name"], row["qty"]) for row in matched],
             None, pricebook, menu,
-        )
-    except Exception:
-        return None
+        ), ""
+    except Exception as e:  # noqa: BLE001 — the caller falls through and logs why
+        return None, type(e).__name__
 
 
 def invoke_record_catering_acceptance(lead_id: str, chat_id: str, message_id: str,

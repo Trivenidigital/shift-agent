@@ -634,6 +634,10 @@ def test_full_lifecycle_inquiry_to_quote_delivered(sandbox):
 # ═════════════════════════════════════════════════════════════════════════════
 # EXPLICIT QUANTITIES — customer names items + counts, no option, no operator CLI
 # ═════════════════════════════════════════════════════════════════════════════
+def _cents(cents: int) -> str:
+    return f"${cents // 100:,}.{cents % 100:02d}"
+
+
 def _plugin_env(sb: Sandbox, monkeypatch) -> None:
     """The cf-router plugin runs IN this process (it is a Hermes plugin, not a
     script), and its subprocesses inherit os.environ — so os.environ becomes the
@@ -644,9 +648,8 @@ def _plugin_env(sb: Sandbox, monkeypatch) -> None:
             monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setenv("CATERING_AUTOMATION_CONTROL_ENABLED", "1")
-    monkeypatch.setenv("CATERING_AUTOMATION_CONTROL_ALLOWLIST", CUSTOMER_JID)
-    monkeypatch.delenv("CATERING_EXPLICIT_QTY_ENABLED", raising=False)  # default ON
+    # The arm's own allowlist, as the operator sets it: an E.164 phone.
+    monkeypatch.setenv("CATERING_EXPLICIT_QTY_ALLOWLIST", CUSTOMER_PHONE)
 
 
 def test_explicit_quantities_reach_owner_card_and_quote_with_no_operator_step(sandbox, monkeypatch):
@@ -696,6 +699,11 @@ def test_explicit_quantities_reach_owner_card_and_quote_with_no_operator_step(sa
     cards = sb.to(OWNER_JID)[owner_before:]
     assert len(cards) == 1, f"expected one owner card, got {cards}"
     assert f"{code} approve" in cards[0]["message"], cards[0]["message"]
+    # L1: each card line is the kernel's cents (10 × $5.99 = $59.90), not the
+    # rounded whole-dollar unit × qty ($60) that stopped adding up to the total.
+    idly_line = f"Idly (3 PCS) × 10  {_cents(overrides['Idly (3 PCS)'] * 10)}"
+    assert idly_line in cards[0]["message"], cards[0]["message"]
+    assert overrides["Idly (3 PCS)"] % 100, "precondition: a non-whole-dollar unit price"
     acks = sb.to(CUSTOMER_JID)[customer_before:]
     assert len(acks) == 1 and "saved for owner approval" in acks[0]["message"], acks
     assert not any(row.get("type") == "catering_proposal_selected"
@@ -710,8 +718,7 @@ def test_explicit_quantities_reach_owner_card_and_quote_with_no_operator_step(sa
     assert lead["pricing_inputs"]["total_cents"] == expected_cents, "cents frozen at finalize"
     quotes = sb.to(CUSTOMER_JID)[customer_before:]
     assert len(quotes) == 1, quotes
-    exact = f"${expected_cents // 100:,}.{expected_cents % 100:02d}"
-    assert f"Total: {exact}" in quotes[0]["message"], quotes[0]["message"]
+    assert f"Total: {_cents(expected_cents)}" in quotes[0]["message"], quotes[0]["message"]
     assert_only_stub_saw_traffic(sb)
 
 
