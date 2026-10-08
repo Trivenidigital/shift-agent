@@ -1334,18 +1334,56 @@ def front_brain_outbound_enforce_enabled(jid: str) -> bool:
     allowlist DISABLES (never global-on). A literal ``*`` entry graduates the
     tier to EVERY chat — an EXPLICIT opt-in, never the empty-list flip; matched
     on the RAW entries because normalization would strip the ``*``. Default unset
-    → OFF (byte-identical send path)."""
+    → OFF (byte-identical send path). An admitted chat that is owner-directed
+    is NOT screened (see _front_brain_owner_directed)."""
     if os.environ.get("FRONT_BRAIN_OUTBOUND_ENFORCE", "") != "1":
         return False
     raw_entries = [p.strip() for p in
                    os.environ.get("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "").split(",") if p.strip()]
     if "*" in raw_entries:
-        return True
+        return not _front_brain_owner_directed(jid)
     allowlist = {_front_brain_normalize_chat_key(p) for p in raw_entries}
     allowlist.discard("")
     if not allowlist:
         return False
-    return _front_brain_normalize_chat_key(jid) in allowlist
+    if _front_brain_normalize_chat_key(jid) not in allowlist:
+        return False
+    return not _front_brain_owner_directed(jid)
+
+
+def _front_brain_owner_directed(jid: str) -> bool:
+    """True when `jid` normalizes to any configured owner identity
+    (self_chat_jid / phone / lid / authorized_identities[*].phone|lid).
+
+    Owner-directed sends are exempt from the front-brain screen even when the
+    allowlist admits them: the owner is the control plane, not a customer, and
+    the screen exists for customer-facing LLM-composed replies. Incident
+    2026-10-05..08: after the 2026-10-03 owner swap the allowlisted owner
+    identity got the generic ack in place of the daily brief ("scheduled",
+    "Quotes sent") every morning, while send-daily-brief recorded brief_sent.
+
+    Plain yaml + dict access, NOT Config validation — an operator-edited file
+    must not break sends. Any fault → False (screen, i.e. the prior behavior).
+    Re-read on every call: sends are rare, and a stale cache after an owner
+    swap is the exact failure this exists to fix."""
+    try:
+        import yaml as _yaml
+        cfg_path = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+        doc = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        owner = doc.get("owner") if isinstance(doc, dict) else None
+        if not isinstance(owner, dict):
+            return False
+        identities = [owner.get("self_chat_jid"), owner.get("phone"), owner.get("lid")]
+        extra = owner.get("authorized_identities") or []
+        if isinstance(extra, list):
+            for ident in extra:
+                if isinstance(ident, dict):
+                    identities += [ident.get("phone"), ident.get("lid")]
+        owner_keys = {_front_brain_normalize_chat_key(str(i)) for i in identities if i}
+        owner_keys.discard("")
+        return _front_brain_normalize_chat_key(jid) in owner_keys
+    except Exception:
+        return False
 
 
 def _front_brain_chat_key_hash(jid: str) -> str:

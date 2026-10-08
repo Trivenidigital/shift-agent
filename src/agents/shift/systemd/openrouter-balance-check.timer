@@ -6,7 +6,9 @@ Description=Daily OpenRouter balance threshold check
 # main session) arms it once per VPS with:
 #   systemctl daemon-reload && systemctl enable --now openrouter-balance-check.timer
 # Threshold override: set OPENROUTER_BALANCE_ALERT_THRESHOLD_USD in the env
-# file the service sources (default $5).
+# file the service sources (default $5). The same run also checks the API
+# key's own spend cap; override with OPENROUTER_KEY_LIMIT_ALERT_THRESHOLD_USD
+# (default $5, openrouter_key_limit_* events).
 
 [Timer]
 # Daily 14:00 UTC (offset from the Sun 13:00 routing summary so failure pages
