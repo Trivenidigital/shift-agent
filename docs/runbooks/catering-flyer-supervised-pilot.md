@@ -99,7 +99,7 @@ Controls: customer `STOP` / `PAUSE` / `RESUME` (whole message); owner
 
 | Symptom | Where to look | Action |
 |---|---|---|
-| Owner receives "Thanks for your message! I'm here to help…" instead of the brief/card | `decisions.log` `front_brain_outbound_refused` | Owner identities must not be in `FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST` (post-fix: owner-directed sends are exempt in `safe_io`) |
+| Owner receives "Thanks for your message! I'm here to help…" instead of the brief/card | `decisions.log` `front_brain_outbound_refused` | Scripted `bridge_post` sends to the primary owner (`owner.self_chat_jid`/`phone`/`lid`) are exempt from the front-brain screen since the 2026-10 fix; the owner's free-form LLM chat and any `authorized_identities` alias are still screened by design. If the row names a scripted owner send, check `config.yaml` `owner.*` matches the live owner. |
 | Hourly Pushover "Flyer manual queue SLA breach" | `flyer-manual-queue --triage` | Dispose the row: `--complete <id> --asset <path>` or `--close <id> --reason … [--no-notify]` |
 | Flyer stuck `manual_edit_required` with `reference_low_confidence` | project `reference_extractions.detail` | Price-less menu photo; ask for a text brief or prices |
 | Model calls fail, state shows `provider_unavailable` | `check-openrouter-balance` events | Raise key cap / top up credits (openrouter.ai) |
