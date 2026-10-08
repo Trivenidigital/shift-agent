@@ -14,7 +14,7 @@ messaged during rehearsals.
 
 ```
 ssh main-vps 'bash -s' <<'EOF' > .pre.txt 2>&1
-cat /opt/shift-agent/DEPLOY_RECEIPT.json | head -3
+cat /opt/shift-agent/.commit-hash; head -3 /opt/shift-agent/DEPLOY_RECEIPT.json
 systemctl is-active hermes-gateway shift-agent-cockpit catering-owner-action-watchdog
 curl -s http://127.0.0.1:3000/health; echo
 pid=$(systemctl show hermes-gateway -p MainPID --value); tr '\0' '\n' </proc/$pid/environ | grep -E '^(FRONT_BRAIN_OUTBOUND_ENFORCE|CATERING_(STOP|TAKEOVER|AUTOMATION_CONTROL)|FLYER_STYLE_REGISTERS_ALLOWLIST)'
@@ -23,7 +23,7 @@ runuser -u shift-agent -m -- /usr/local/bin/pilot-readiness-check --text | head 
 /usr/local/bin/check-openrouter-balance --notify-bin /bin/true
 EOF
 ```
-Go only if: receipt commit = expected; three units active; bridge `connected` with
+Go only if: `.commit-hash` label and receipt `commit` both equal the expected release; three units active; bridge `connected` with
 `queueLength: 0`; owner resolves with `"owner"` in roles; readiness READY; both
 `openrouter_balance_ok` and `openrouter_key_limit_ok` (a key at its cap returns HTTP 403
 on every model call — nothing in Flyer works, and the symptom in state is
