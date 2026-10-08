@@ -121,3 +121,50 @@ def test_arbitrary_pric_substring_is_not_offer():
     # offer fact under the strict predicate.
     p = _proj([("price_note", "Price Note", "prices subject to change")])
     assert visual_qa._has_offer_fact(p) is False
+
+
+# --- Price-less menu reference (F0226/F0228): the owner's menu photo carries
+# item names but no prices, so there is NO creative latitude on pricing — any
+# visible currency amount was invented and must block. -----------------------
+
+
+def _priceless_menu_proj(extra_facts=()):
+    from schemas import FlyerReferenceExtraction
+
+    item_names = [("item:0:name", "Item", "Idli Sambar"), ("item:1:name", "Item", "Masala Dosa")]
+    p = _proj([("business_name", "Business", "Lakshmi's Kitchen"), *item_names, *extra_facts])
+    p.reference_extractions = [
+        FlyerReferenceExtraction(
+            asset_id="A0001",
+            role="menu_reference",
+            provider="openrouter_vision",
+            status="ok",
+            extracted_facts=[
+                FlyerLockedFact(fact_id=fid, label=label, value=value, source="reference_vision", required=True)
+                for fid, label, value in item_names
+            ],
+        )
+    ]
+    return p
+
+
+def test_priceless_menu_reference_blocks_any_visible_price():
+    p = _priceless_menu_proj()
+    b = visual_qa._fabricated_offer_price_blockers(p, "Lakshmi's Kitchen\nIdli Sambar $8.99\nMasala Dosa \u20b9120")
+    assert "fabricated price visible: $8.99" in b
+    assert "fabricated price visible: \u20b9120" in b
+    assert visual_qa.classify_qa_severity(b, project=p) == "block"
+
+
+def test_priceless_menu_reference_without_prices_passes():
+    p = _priceless_menu_proj()
+    assert visual_qa._fabricated_offer_price_blockers(p, "Lakshmi's Kitchen\nIdli Sambar\nMasala Dosa") == []
+
+
+def test_priceless_menu_reference_with_customer_typed_price_keeps_locked_price_gate():
+    # Witness: a customer-supplied price means prices are NOT omitted — the locked
+    # price passes and only an unlocked one blocks (existing behaviour).
+    p = _priceless_menu_proj([("item:0:price", "Price", "$7")])
+    assert visual_qa._fabricated_offer_price_blockers(p, "Idli Sambar $7\nMasala Dosa") == []
+    b = visual_qa._fabricated_offer_price_blockers(p, "Idli Sambar $7\nMasala Dosa $9")
+    assert b == ["fabricated price visible: $9"]

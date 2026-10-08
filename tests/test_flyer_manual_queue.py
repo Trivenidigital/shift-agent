@@ -1411,3 +1411,180 @@ def test_operator_reject_close_sets_reason_code():
     store = FlyerProjectStore(projects=[project])
     updated = close_manual_project(store, "F9100", reason="fabricated facts must never ship")
     assert updated.projects[0].manual_review.reason_code == "operator_request"
+
+
+# --- --retry-extraction: recovery for preserved genuine requests (F0226/F0228
+# died as reference_low_confidence on a price-less menu photo; the extractor now
+# accepts that shape, but stuck rows only re-extract from `not_run`). ---------
+
+def _reference_low_confidence_project(project_id: str = "F0228", **updates) -> FlyerProject:
+    """The REAL F0226/F0228 failure shape."""
+    now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+    base = FlyerProject(
+        project_id=project_id,
+        status="manual_edit_required",
+        customer_phone="+15550100001",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-lakshmi-same-items",
+        raw_request=(
+            "Create similar flyer for Lakshmi's kitchen , same exact items\n"
+            "Uploaded reference image/template is attached. Use it when designing this flyer."
+        ),
+        reference_extractions=[
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="menu_reference",
+                provider="openrouter_vision",
+                status="low_confidence",
+                extracted_facts=[],
+                detail="no high-confidence item/price facts extracted",
+                extracted_at=now,
+            ),
+        ],
+        manual_review=FlyerManualReview(
+            status="queued",
+            reason="reference_low_confidence",
+            reason_code="reference_low_confidence",
+            detail="no high-confidence item/price facts extracted",
+            queued_at=now,
+        ),
+    )
+    return base.model_copy(update=updates)
+
+
+def test_retry_extraction_resets_failed_rows_status_and_manual_review():
+    from agents.flyer.manual_queue import list_manual_queue, retry_reference_extraction
+    from schemas import FlyerLockedFact
+
+    ok_row = FlyerReferenceExtraction(
+        asset_id="A0002",
+        role="logo",
+        provider="openrouter_vision",
+        status="ok",
+        extracted_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="reference_vision")],
+        detail="kept",
+    )
+    unavailable_row = FlyerReferenceExtraction(
+        asset_id="A0003", role="menu_reference", provider="openrouter_vision",
+        status="provider_unavailable", detail="reference OCR/vision provider unavailable",
+    )
+    project = _reference_low_confidence_project()
+    project = project.model_copy(update={
+        "reference_extractions": [*project.reference_extractions, ok_row, unavailable_row],
+    })
+
+    store, result = retry_reference_extraction(FlyerProjectStore(projects=[project]), "F0228")
+    after = store.projects[0]
+
+    assert result["project_id"] == "F0228"
+    assert result["rows_reset"] == 2
+    assert result["from_status"] == "manual_edit_required"
+    assert result["new_status"] == "generating_concepts"
+    assert after.status == "generating_concepts"
+    rows = {row.asset_id: row for row in after.reference_extractions}
+    for asset_id in ("A0001", "A0003"):
+        assert rows[asset_id].status == "not_run"
+        assert rows[asset_id].extracted_facts == []
+        assert rows[asset_id].role == "menu_reference"
+    # witness: an ok row is untouched
+    assert rows["A0002"] == ok_row
+    assert after.manual_review.status == "none"
+    assert list_manual_queue(store) == []
+
+
+def test_retry_extraction_refuses_non_queued_project_without_force():
+    from agents.flyer.manual_queue import retry_reference_extraction
+
+    project = _reference_low_confidence_project(status="awaiting_final_approval", manual_review=FlyerManualReview())
+    store = FlyerProjectStore(projects=[project])
+
+    with pytest.raises(ValueError, match="not in manual_edit_required"):
+        retry_reference_extraction(store, "F0228")
+    assert store.projects[0].reference_extractions[0].status == "low_confidence"
+
+
+def test_retry_extraction_force_still_refuses_illegal_transition():
+    from agents.flyer.manual_queue import retry_reference_extraction
+
+    project = _reference_low_confidence_project(status="awaiting_final_approval", manual_review=FlyerManualReview())
+
+    with pytest.raises(ValueError, match="invalid transition"):
+        retry_reference_extraction(FlyerProjectStore(projects=[project]), "F0228", force=True)
+
+
+def test_retry_extraction_force_on_generating_project_keeps_status():
+    from agents.flyer.manual_queue import retry_reference_extraction
+
+    project = _reference_low_confidence_project(status="generating_concepts")
+
+    store, result = retry_reference_extraction(FlyerProjectStore(projects=[project]), "F0228", force=True)
+
+    assert result["new_status"] == "generating_concepts"
+    assert store.projects[0].reference_extractions[0].status == "not_run"
+
+
+def test_retry_extraction_refuses_when_nothing_to_reset():
+    from agents.flyer.manual_queue import retry_reference_extraction
+
+    project = _reference_low_confidence_project(reference_extractions=[])
+
+    with pytest.raises(ValueError, match="no low_confidence/provider_unavailable"):
+        retry_reference_extraction(FlyerProjectStore(projects=[project]), "F0228")
+
+
+def _run_manual_queue_script(*args: str):
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "flyer-manual-queue"
+    return subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True, timeout=60)
+
+
+def test_retry_extraction_script_resets_audits_and_prints_next_command(tmp_path):
+    from pydantic import TypeAdapter
+    from schemas import LogEntry
+
+    state = tmp_path / "projects.json"
+    decisions = tmp_path / "decisions.log"
+    state.write_text(FlyerProjectStore(projects=[_reference_low_confidence_project()]).model_dump_json(), encoding="utf-8")
+
+    proc = _run_manual_queue_script(
+        "--state-path", str(state), "--decisions-log-path", str(decisions), "--retry-extraction", "F0228",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["project_id"] == "F0228"
+    assert out["rows_reset"] == 1
+    assert out["new_status"] == "generating_concepts"
+    assert out["next_command"] == "/usr/local/bin/generate-flyer-concepts --project-id F0228"
+    persisted = FlyerProjectStore.model_validate_json(state.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "generating_concepts"
+    assert persisted.reference_extractions[0].status == "not_run"
+    rows = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 1
+    entry = TypeAdapter(LogEntry).validate_python(rows[0])
+    assert entry.type == "flyer_status_change"
+    assert entry.from_status == "manual_edit_required"
+    assert entry.to_status == "generating_concepts"
+    assert entry.actor == "operator"
+    assert "retry_extraction" in entry.reason
+
+
+def test_retry_extraction_script_refuses_non_queued_project_exit_2(tmp_path):
+    state = tmp_path / "projects.json"
+    decisions = tmp_path / "decisions.log"
+    project = _reference_low_confidence_project(status="awaiting_final_approval", manual_review=FlyerManualReview())
+    state.write_text(FlyerProjectStore(projects=[project]).model_dump_json(), encoding="utf-8")
+
+    proc = _run_manual_queue_script(
+        "--state-path", str(state), "--decisions-log-path", str(decisions), "--retry-extraction", "F0228",
+    )
+
+    assert proc.returncode == 2
+    assert "not in manual_edit_required" in proc.stderr
+    persisted = FlyerProjectStore.model_validate_json(state.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "awaiting_final_approval"
+    assert persisted.reference_extractions[0].status == "low_confidence"
+    assert not decisions.exists()

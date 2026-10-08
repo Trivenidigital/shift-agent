@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from schemas import FlyerAsset
 
 
@@ -182,25 +184,113 @@ def test_reference_extract_keeps_named_combos_as_item_prices(tmp_path, monkeypat
     assert "pricing_structure" not in by_id
 
 
-def test_menu_reference_with_bullet_items_but_no_prices_stays_low_confidence(tmp_path, monkeypatch):
+# Real failure shape: F0226 (2026-08-01) and F0228 (2026-10-03) both died as
+# reference_low_confidence because the owner's menu photo carries no prices.
+PRICELESS_MENU_RAW_REQUEST = (
+    "Create similar flyer for Lakshmi's kitchen , same exact items\n"
+    "Uploaded reference image/template is attached. Use it when designing this flyer."
+)
+PRICELESS_MENU_TEXT = "- Idli Sambar\n- Masala Dosa\n- Medu Vada\n- Pongal\n- Filter Coffee"
+
+
+def test_menu_reference_with_bullet_items_but_no_prices_is_ok_with_prices_omitted(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, classify_reference_role, extract_reference
+
+    class UnpricedMenuProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return PRICELESS_MENU_TEXT, "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    asset = _asset(tmp_path)
+    assert classify_reference_role(PRICELESS_MENU_RAW_REQUEST, asset) == "menu_reference"
+
+    result = extract_reference(
+        asset, raw_request=PRICELESS_MENU_RAW_REQUEST, provider=UnpricedMenuProvider(), priceless_menu_allowed=True,
+    )
+
+    assert result.status == "ok", result.detail
+    assert [fact.value for fact in result.extracted_facts if fact.fact_id.endswith(":name")] == [
+        "Idli Sambar",
+        "Masala Dosa",
+        "Medu Vada",
+        "Pongal",
+        "Filter Coffee",
+    ]
+    assert not any("$" in fact.value for fact in result.extracted_facts)
+    assert "prices omitted" in result.detail
+
+
+def test_menu_reference_priceless_items_not_allowlisted_keeps_old_low_confidence(tmp_path, monkeypatch):
+    # Witness: without the FLYER_PRICELESS_MENU_ALLOWLIST gate (the default) a
+    # price-less menu behaves exactly as before — facts emptied, low_confidence.
     from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
 
     class UnpricedMenuProvider(ReferenceExtractionProvider):
         provider_name = "test_vision"
 
         def extract_text(self, _asset, _raw_request):
-            return "- Onion Pakoda\n- Mirchi Bajji\n- Samosa", "ok"
+            return PRICELESS_MENU_TEXT, "ok"
 
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
 
-    result = extract_reference(
-        _asset(tmp_path),
-        raw_request="Extract item names and prices from attached sample flyer",
-        provider=UnpricedMenuProvider(),
-    )
+    result = extract_reference(_asset(tmp_path), raw_request=PRICELESS_MENU_RAW_REQUEST, provider=UnpricedMenuProvider())
 
     assert result.status == "low_confidence"
     assert result.extracted_facts == []
+    assert result.detail == (
+        "no prices on reference; price-less menus not enabled for this customer "
+        "(FLYER_PRICELESS_MENU_ALLOWLIST)"
+    )
+
+
+@pytest.mark.parametrize(
+    "allowlist, phone, expected",
+    [
+        ("+15550100001", "+15550100001", True),
+        ("+15550100001", "15550100001@s.whatsapp.net", True),
+        ("+15550100001, +17329837841", "+17329837841", True),
+        ("*", "+19999999999", True),
+        ("+15550100001", "+19999999999", False),
+        ("", "+15550100001", False),
+        (None, "+15550100001", False),
+    ],
+)
+def test_priceless_menu_enabled_allowlist(monkeypatch, allowlist, phone, expected):
+    from agents.flyer.reference_extract import priceless_menu_enabled
+
+    if allowlist is None:
+        monkeypatch.delenv("FLYER_PRICELESS_MENU_ALLOWLIST", raising=False)
+    else:
+        monkeypatch.setenv("FLYER_PRICELESS_MENU_ALLOWLIST", allowlist)
+
+    assert priceless_menu_enabled(phone) is expected
+
+
+def test_menu_reference_without_items_or_prices_stays_low_confidence(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
+
+    class HeadingOnlyProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Lakshmi's Kitchen\nBreakfast Menu", "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = extract_reference(_asset(tmp_path), raw_request=PRICELESS_MENU_RAW_REQUEST, provider=HeadingOnlyProvider())
+
+    assert result.status == "low_confidence"
+    assert result.extracted_facts == []
+
+
+def test_same_exact_items_request_requires_reference_menu_items():
+    from agents.flyer.reference_extract import _request_requires_reference_menu_items
+
+    assert _request_requires_reference_menu_items(PRICELESS_MENU_RAW_REQUEST)
+    assert _request_requires_reference_menu_items("Make a flyer with the same items")
+    assert not _request_requires_reference_menu_items("Make a Diwali flyer")
 
 
 def test_low_confidence_reference_does_not_return_facts(tmp_path, monkeypatch):

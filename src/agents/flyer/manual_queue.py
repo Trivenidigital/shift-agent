@@ -602,6 +602,71 @@ def close_manual_project(
     raise ValueError(f"project not found: {project_id}")
 
 
+RETRY_EXTRACTION_STATUSES = {"low_confidence", "provider_unavailable"}
+# The status create-flyer-project leaves a ready project in (next_status_for_project)
+# and the one generate-flyer-concepts re-extracts `not_run` rows from.
+RETRY_EXTRACTION_TARGET_STATUS = "generating_concepts"
+
+
+def retry_reference_extraction(
+    store: FlyerProjectStore,
+    project_id: str,
+    *,
+    force: bool = False,
+) -> tuple[FlyerProjectStore, dict]:
+    """Re-arm reference extraction for a project stuck on a failed extraction.
+
+    Resets every low_confidence/provider_unavailable reference_extractions row
+    to `not_run` (facts cleared) so the next generate-flyer-concepts run
+    re-extracts it, takes the row off the manual queue, and moves the project
+    back to generating_concepts through the transition table. Sends nothing.
+    """
+    now = datetime.now(timezone.utc)
+    for idx, project in enumerate(store.projects):
+        if project.project_id != project_id:
+            continue
+        if project.status != "manual_edit_required" and not force:
+            raise ValueError(
+                f"project {project_id} is not in manual_edit_required "
+                f"(status={project.status}); pass --force to retry anyway"
+            )
+        target = RETRY_EXTRACTION_TARGET_STATUS
+        if project.status != target and not is_flyer_transition_allowed(project.status, target):
+            raise ValueError(f"invalid transition {project.status}->{target}")
+        rows_reset = 0
+        reference_extractions = []
+        for extraction in project.reference_extractions:
+            if extraction.status in RETRY_EXTRACTION_STATUSES:
+                extraction = extraction.model_copy(update={
+                    "status": "not_run",
+                    "extracted_facts": [],
+                    "detail": f"operator retry_extraction reset from {extraction.status}",
+                    "extracted_at": None,
+                    "source_contract": None,
+                })
+                rows_reset += 1
+            reference_extractions.append(extraction)
+        if not rows_reset:
+            raise ValueError(
+                f"project {project_id} has no low_confidence/provider_unavailable "
+                "reference extractions to retry"
+            )
+        store.projects[idx] = project.model_copy(update={
+            "status": target,
+            "reference_extractions": reference_extractions,
+            "manual_review": FlyerManualReview(),
+            "updated_at": now,
+        })
+        return FlyerProjectStore.model_validate(store.model_dump()), {
+            "project_id": project_id,
+            "rows_reset": rows_reset,
+            "from_status": project.status,
+            "new_status": target,
+            "previous_manual_reason_code": str(project.manual_review.reason_code),
+        }
+    raise ValueError(f"project not found: {project_id}")
+
+
 # ─────────────────────────────────────────────────────────────────
 # Proactive closure customer-notification helpers (PR follow-up to PR #129)
 #

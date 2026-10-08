@@ -24,6 +24,11 @@ from schemas import (
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 REFERENCE_VISION_MODEL = os.environ.get("FLYER_REFERENCE_VISION_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
+PRICES_OMITTED_DETAIL = "items extracted; no prices on reference - prices omitted"
+PRICELESS_MENU_NOT_ENABLED_DETAIL = (
+    "no prices on reference; price-less menus not enabled for this customer "
+    "(FLYER_PRICELESS_MENU_ALLOWLIST)"
+)
 
 REFERENCE_EXTRACTION_PROMPT = """Read this uploaded reference/menu flyer image for Flyer Studio.
 
@@ -516,8 +521,29 @@ def _request_requires_reference_menu_items(raw_request: str) -> bool:
             "use as a reference",
             "source flyer",
             "attached flyer",
+            "same exact items",
+            "same items",
         )
     )
+
+
+def priceless_menu_enabled(customer_phone: str) -> bool:
+    """FLYER_PRICELESS_MENU_ALLOWLIST rollout gate, same allowlist semantics as
+    style_registers_enabled: comma-separated phones/JIDs (normalized both
+    sides), a literal ``*`` = every customer, unset/empty = nobody."""
+    try:
+        from style_registers import _normalize_phone  # type: ignore
+    except ImportError:
+        from agents.flyer.style_registers import _normalize_phone
+    raw_entries = [p.strip() for p in
+                   os.environ.get("FLYER_PRICELESS_MENU_ALLOWLIST", "").split(",") if p.strip()]
+    if "*" in raw_entries:
+        return True
+    allowlist = {_normalize_phone(p) for p in raw_entries}
+    allowlist.discard("")
+    if not allowlist:
+        return False
+    return _normalize_phone(customer_phone) in allowlist
 
 
 def build_reference_extraction_provider() -> ReferenceExtractionProvider:
@@ -665,6 +691,7 @@ def extract_reference(
     *,
     raw_request: str,
     provider: ReferenceExtractionProvider | None = None,
+    priceless_menu_allowed: bool = False,
 ) -> FlyerReferenceExtraction:
     role = classify_reference_role(raw_request, asset)
     provider = provider or NoopReferenceExtractionProvider()
@@ -733,7 +760,11 @@ def extract_reference(
         or (fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price"))
         for fact in facts
     )
-    if role == "menu_reference" and not has_pricing_fact:
+    # A menu photo without prices is still a menu: keep the item names and
+    # render without prices (never invent them) — for allowlisted customers.
+    # Only empty when no item names were found either.
+    priceless_menu_blocked = role == "menu_reference" and not has_pricing_fact and has_item_name and not priceless_menu_allowed
+    if role == "menu_reference" and not has_pricing_fact and (not has_item_name or not priceless_menu_allowed):
         facts = []
     if role == "menu_reference" and _request_requires_reference_menu_items(raw_request) and not has_item_name:
         facts = []
@@ -744,12 +775,20 @@ def extract_reference(
         for fact in facts
     )
     ok = status == "ok" and bool(facts) and has_menu_fact
+    if priceless_menu_blocked:
+        detail = PRICELESS_MENU_NOT_ENABLED_DETAIL
+    elif not ok:
+        detail = "no high-confidence item/price facts extracted"
+    elif role == "menu_reference" and not has_pricing_fact:
+        detail = PRICES_OMITTED_DETAIL
+    else:
+        detail = ""
     return FlyerReferenceExtraction(
         asset_id=asset.asset_id,
         role=role,
         provider=provider.provider_name,
         status="ok" if ok else "low_confidence",
         extracted_facts=facts,
-        detail="" if ok else "no high-confidence item/price facts extracted",
+        detail=detail,
         extracted_at=datetime.now(timezone.utc),
     )

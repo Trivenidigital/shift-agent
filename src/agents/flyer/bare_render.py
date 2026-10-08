@@ -886,6 +886,9 @@ def _build_facts_prompt(project, strict_note: str = "") -> str:
                      "card showing the item name with its price (do NOT make a separate card for a price):")
         for _idx, d in named:
             parts.append(f"  - {d['name']}" + (f" - {d['price']}" if d.get("price") else ""))
+    F = _facts_mod()
+    if F.reference_prices_omitted(project):
+        parts.append(F.PRICES_OMITTED_DIRECTIVE)
     if strict_note:
         parts.append(strict_note)
     return "\n".join(parts)

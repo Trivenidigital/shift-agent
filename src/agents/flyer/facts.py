@@ -1320,6 +1320,39 @@ def fact_value(
     return fallback or ""
 
 
+PRICES_OMITTED_DIRECTIVE = (
+    "Do not show any prices, amounts or currency symbols - this menu is presented without prices."
+)
+
+
+def _is_price_bearing_fact(fact: FlyerLockedFact) -> bool:
+    fid = fact.fact_id
+    return (
+        fid == "pricing_structure"
+        or fid.startswith("offer")
+        or (fid.startswith("item:") and fid.endswith(":price"))
+        or "$" in (fact.value or "")
+    )
+
+
+def reference_prices_omitted(project: FlyerProject | object) -> bool:
+    """True when the owner's menu reference carries item names but no prices
+    (and nothing else on the project supplies a price): the flyer must be
+    rendered WITHOUT prices, and any visible price is a fabrication."""
+    if any(_is_price_bearing_fact(fact) for fact in getattr(project, "locked_facts", None) or []):
+        return False
+    for extraction in getattr(project, "reference_extractions", None) or []:
+        facts = extraction.extracted_facts or []
+        if (
+            extraction.role == "menu_reference"
+            and extraction.status == "ok"
+            and any(f.fact_id.startswith("item:") and f.fact_id.endswith(":name") for f in facts)
+            and not any(_is_price_bearing_fact(f) for f in facts)
+        ):
+            return True
+    return False
+
+
 def _populate_forbidden_substrings(contract: FlyerSourceContract) -> None:
     """Mutate `contract.forbidden_substrings` from requested replacements.
 

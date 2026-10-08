@@ -60,9 +60,9 @@ try:
 except ImportError:
     from agents.flyer.facts import merge_locked_facts, source_contract_locked_facts, _populate_forbidden_substrings  # noqa: E402
 try:
-    from flyer_reference_extract import build_reference_extraction_provider, extract_reference  # type: ignore  # noqa: E402
+    from flyer_reference_extract import build_reference_extraction_provider, extract_reference, priceless_menu_enabled  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
+    from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference, priceless_menu_enabled  # noqa: E402
 try:
     from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_creative_direction_v2_outcome, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
@@ -872,7 +872,12 @@ def main() -> int:
                     extracted_at=now,
                 ))
                 continue
-            extracted.append(extract_reference(asset, raw_request=project.raw_request, provider=provider))
+            extracted.append(extract_reference(
+                asset,
+                raw_request=project.raw_request,
+                provider=provider,
+                priceless_menu_allowed=priceless_menu_enabled(str(project.customer_phone)),
+            ))
         project, failed = _persist_reference_extraction_results(
             state_path,
             args.project_id,
