@@ -24,6 +24,8 @@ Exit codes:
   0 — done
   1 — item not found / items file missing
   2 — bad input
+  3 — item already marked done within RECENT_MARK_WINDOW_SEC (nothing changed;
+      also refused under --dry-run)
 """
 from __future__ import annotations
 
@@ -62,6 +64,11 @@ SENTINEL_LOCK_PATH = Path(os.environ.get("SHIFT_AGENT_COMPLIANCE_LOCK_PATH",
                                           "/opt/shift-agent/state/compliance-check.json.lock"))
 DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
                                      "/opt/shift-agent/logs/decisions.log"))
+# Every call advances renewal_date one cycle, so two "mark <id> done" messages
+# for one completion silently skipped a whole cycle. A repeat inside this window
+# is refused (exit 3). The decisions.log tail is the record of prior marks.
+RECENT_MARK_WINDOW_SEC = 900
+RECENT_MARK_READ_WINDOW_BYTES = 256 * 1024
 
 
 def _customer_now(tz_name: str) -> datetime:
@@ -79,6 +86,48 @@ def _emit_invariant(check_name: str, detail: str) -> None:
         check=check_name, detail=detail[:500],
     )
     _append_best_effort(entry.model_dump_json(), DECISIONS_LOG)
+
+
+def _recent_mark_done_ts(item_id: str, now: datetime) -> str | None:
+    """`ts` of a `compliance_item_marked_done` row for item_id within
+    RECENT_MARK_WINDOW_SEC of now, else None.
+
+    Same tail read as cf-router's find_dispatcher_routed_for: pin the file size,
+    read at most the last RECENT_MARK_READ_WINDOW_BYTES, drop a leading partial
+    line, skip garbage lines and future-dated rows. Best-effort: a missing or
+    unreadable log returns None and the mark proceeds.
+    """
+    try:
+        size = DECISIONS_LOG.stat().st_size
+        if size == 0:
+            return None
+        start = max(0, size - RECENT_MARK_READ_WINDOW_BYTES)
+        with DECISIONS_LOG.open("rb") as fh:
+            fh.seek(start)
+            buf = fh.read(size - start)
+    except OSError:
+        return None
+    if start > 0:
+        nl = buf.find(b"\n")
+        buf = buf[nl + 1:] if nl >= 0 else b""
+    for raw_line in reversed(buf.split(b"\n")):
+        if b"compliance_item_marked_done" not in raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("type") != "compliance_item_marked_done":
+            continue
+        if row.get("item_id") != item_id:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(str(row.get("ts")))).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age <= RECENT_MARK_WINDOW_SEC:
+            return str(row.get("ts"))
+    return None
 
 
 def main() -> int:
@@ -112,6 +161,16 @@ def main() -> int:
             print(json.dumps({"error": "items_file_missing_recreated",
                               "item_id": args.item_id}))
             return 1
+
+        # Checked BEFORE the item lookup: a one-shot item marked done moments
+        # ago is already deleted, and "already marked" is the true answer.
+        previous_ts = _recent_mark_done_ts(
+            args.item_id, _customer_now(cfg.customer.timezone))
+        if previous_ts is not None:
+            print(json.dumps({"error": "recently_marked_done",
+                              "item_id": args.item_id,
+                              "previous_ts": previous_ts}))
+            return 3
 
         f, _ = load_model(ITEMS_PATH, ComplianceItemsFile)
         match = next((i for i in f.items if i.id == args.item_id), None)
@@ -164,17 +223,20 @@ def main() -> int:
                 _emit_invariant("compliance_sentinel_prune_failed",
                                 f"could not prune sentinel for {args.item_id}: {e}")
 
-    if not args.dry_run:
-        entry = ComplianceItemMarkedDone(
-            type="compliance_item_marked_done",
-            ts=_customer_now(cfg.customer.timezone),
-            item_id=args.item_id,
-            completed_renewal_date=completed,
-            next_renewal_date=next_renewal,
-            actor=args.actor,
-            sentinel_keys_pruned=sentinel_keys_pruned,
-        )
-        _append_best_effort(entry.model_dump_json(), DECISIONS_LOG)
+        # Written INSIDE the items lock: the recent-mark guard above reads this
+        # row under the same lock, so a concurrent second mark cannot pass the
+        # guard before the first mark's row exists.
+        if not args.dry_run:
+            entry = ComplianceItemMarkedDone(
+                type="compliance_item_marked_done",
+                ts=_customer_now(cfg.customer.timezone),
+                item_id=args.item_id,
+                completed_renewal_date=completed,
+                next_renewal_date=next_renewal,
+                actor=args.actor,
+                sentinel_keys_pruned=sentinel_keys_pruned,
+            )
+            _append_best_effort(entry.model_dump_json(), DECISIONS_LOG)
 
     print(json.dumps({
         "item_id": args.item_id,

@@ -65,7 +65,9 @@ DESCRIPTION = (
     "WINDOW: supply window_days ONLY when the user states a bounded timeframe "
     "such as 'next 30 days' or 'before October 1'. For generic wording such as "
     "'coming up', 'upcoming', 'soon', or 'what compliance deadlines do I have?', "
-    "OMIT window_days so the deterministic 90-day default applies."
+    "OMIT window_days so the deterministic 90-day default applies.\n"
+    "\n"
+    "This tool cannot mark items done; never say an item was marked done."
 )
 
 # Deterministic replies bound to the turn for every zero state. Bounded strings,
@@ -262,5 +264,11 @@ def handler(args=None, **kwargs) -> str:
         if not _bind_outbound(TPL_POPULATED_ZERO.format(window_days=window_days)):
             return refuse("outbound_truthfulness_guard_unavailable")
     # Positive rows bind nothing: Hermes owns presenting real deadlines.
+    extra = {}
+    # Only while cf-router's mark-done arm is armed (same env flag): a hint to a
+    # dormant token would invite the model to answer it.
+    if os.environ.get("COMPLIANCE_MARK_DONE_ENABLED") == "1":
+        extra["to_mark_done"] = "The owner must send exactly: mark <id> done"
     return ok(source_status="populated", window_days=window_days,
-              tracked_total=len(rows), in_window=len(in_window), items=in_window)
+              tracked_total=len(rows), in_window=len(in_window), items=in_window,
+              **extra)
