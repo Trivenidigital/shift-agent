@@ -488,7 +488,7 @@ LIVE_CAPTION = "Expense receipt — review this"
 def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
                   owner_capability=True, caption=LIVE_CAPTION,
                   media=LIVE_MEDIA, extract_rc=0, expense_enabled=True,
-                  extract_out=None, leads_rows=None):
+                  extract_out=None, leads_rows=None, extract_err=""):
     """Wire the live failure shape and return the recorders."""
     rec = {"brand_asset": [], "audits": [], "sends": [], "extract": [],
            "dispatcher_routed": []}
@@ -541,7 +541,7 @@ def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
         rec["extract"].append(kw)
         out = (json.dumps({"expense_id": "E0001", "approval_card_text": card})
                if extract_out is None else extract_out)
-        return extract_rc, out, ""
+        return extract_rc, out, extract_err
     monkeypatch.setattr(actions_mod, "invoke_extract_receipt", _extract)
 
     event = SimpleNamespace(text=caption, chat_id=LIVE_CHAT,
@@ -641,7 +641,7 @@ def test_turn_snapshot_survives_a_transient_identity_failure(plugin, monkeypatch
     assert len(rec["extract"]) == 1, rec["extract"]
 
 
-# ── truthful failure copy + disabled-agent fall-through ─────────────────────
+# ── truthful failure copy + disabled-agent refusal ─────────────────────
 
 def _ctx_get(ctx, key):
     if isinstance(ctx, dict):
@@ -649,24 +649,33 @@ def _ctx_get(ctx, key):
     return getattr(ctx, key)
 
 
-@pytest.mark.parametrize("rc,leads_rows,expected_attr", [
-    (3, [], "_RECEIPT_DISABLED_TEXT"),
-    (6, [], "_RECEIPT_PROVIDER_DOWN_TEXT"),
-    (124, [], "_RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT"),
-    (124, [{"expense_id": "E0001", "status": "DRAFTED",
-            "original_message_id": "wamid.LIVE"}],
-     "_RECEIPT_TIMEOUT_DRAFT_SAVED_TEXT"),
-    (5, [], "_RECEIPT_INGESTION_FAILED_TEXT"),
-], ids=["disabled", "provider_down", "timeout_nothing", "timeout_draft_saved",
-        "other"])
-def test_failure_copy_by_rc(plugin, monkeypatch, tmp_path, rc, leads_rows,
+_SAVED_ROW = {"expense_id": "E0001", "status": "DRAFTED",
+              "original_message_id": "wamid.LIVE"}
+
+
+@pytest.mark.parametrize("rc,err,expected_attr", [
+    (2, "expense_bookkeeper disabled\n", "_RECEIPT_DISABLED_TEXT"),
+    (2, "image not found: /x.jpg\n", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (3, "", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (5, "vision schema violation: bad json\n", "_RECEIPT_INGESTION_FAILED_TEXT"),
+    (5, "config load failed: boom\n", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (5, "classify schema violation: bad\n", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (6, "vision API error: 503\n", "_RECEIPT_PROVIDER_DOWN_TEXT"),
+    (124, "timeout", "_RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT"),
+    (127, "No such file", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (0, "", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+    (42, "", "_RECEIPT_SYSTEM_ERROR_TEXT"),
+], ids=["disabled_rc2_marker", "rc2_invalid_input", "rc3_unused", "vision_schema",
+        "rc5_config", "rc5_classify", "provider_down", "timeout_nothing",
+        "rc127", "rc0_unverified_nothing", "unknown"])
+def test_failure_copy_by_rc(plugin, monkeypatch, tmp_path, rc, err,
                             expected_attr):
-    """A failure that is not about the photo must not blame the photo, and no
-    failure send may claim the action completed."""
+    """A failure that recorded nothing says so, blames the photo only when the
+    kernel actually failed to read it, and never claims completion."""
     hooks_mod, actions_mod = plugin
     rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
                                extract_rc=rc, extract_out="",
-                               leads_rows=leads_rows)
+                               leads_rows=[], extract_err=err)
 
     hooks_mod._pre_gateway_dispatch_impl(event)
 
@@ -678,8 +687,40 @@ def test_failure_copy_by_rc(plugin, monkeypatch, tmp_path, rc, leads_rows,
     ctx = rec["send_contexts"][-1]
     assert _ctx_get(ctx, "claims_action_completed") is False
     assert _ctx_get(ctx, "verified_action_result") is False
+    assert _ctx_get(ctx, "action_id") == "expense.receipt.ingestion_failed"
     if expected_attr != "_RECEIPT_INGESTION_FAILED_TEXT":
         assert "could not read" not in expected.lower()
+    assert "pending expense drafts" not in expected
+
+
+@pytest.mark.parametrize("rc,extract_out,expected_attr", [
+    (124, "", "_RECEIPT_TIMEOUT_DRAFT_SAVED_TEXT"),
+    # clean exit, store holds the draft, but the script printed no card
+    (0, json.dumps({"expense_id": "E0001"}), "_RECEIPT_DRAFT_SAVED_NO_CARD_TEXT"),
+    # duplicate exit, stdout unparseable: the store still proves the save
+    (7, "not json", "_RECEIPT_DRAFT_SAVED_NO_CARD_TEXT"),
+], ids=["timeout", "rc0_no_card", "rc7_bad_stdout"])
+def test_saved_draft_without_card_is_a_verified_completion_naming_the_lead(
+        plugin, monkeypatch, tmp_path, rc, extract_out, expected_attr):
+    """When the store re-read proves a DRAFTED lead for THIS message, the reply
+    names it and is sent as the verified completion it is (matching the success
+    path's context) and never points at a non-existent drafts list."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
+                               extract_rc=rc, extract_out=extract_out,
+                               leads_rows=[_SAVED_ROW])
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    expected = getattr(hooks_mod, expected_attr).format(expense_id="E0001")
+    assert rec["sends"] == [expected]
+    assert "saved for review as E0001" in expected
+    assert "pending expense drafts" not in expected
+    ctx = rec["send_contexts"][-1]
+    assert _ctx_get(ctx, "action_id") == "expense.receipt.drafted:E0001"
+    assert _ctx_get(ctx, "verified_action_result") is True
+    assert _ctx_get(ctx, "claims_action_completed") is True
+    assert _ctx_get(ctx, "mutation_class") == "local_reversible"
 
 
 def test_timeout_draft_lookup_ignores_other_messages_drafts(plugin, monkeypatch,
@@ -696,6 +737,7 @@ def test_timeout_draft_lookup_ignores_other_messages_drafts(plugin, monkeypatch,
     hooks_mod._pre_gateway_dispatch_impl(event)
 
     assert rec["sends"] == [hooks_mod._RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT]
+    assert _ctx_get(rec["send_contexts"][-1], "claims_action_completed") is False
 
 
 def test_disabled_agent_claims_turn_with_disabled_copy_no_subprocess(

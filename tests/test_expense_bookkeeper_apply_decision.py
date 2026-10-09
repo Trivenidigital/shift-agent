@@ -701,4 +701,34 @@ def test_undo_missing_pushed_at_is_outside_window(env_dir, bridge_server):
     assert "expense_reversed" not in _audit_types(env_dir)
     msg = stub.requests[-1].get("message", "")
     assert "undo E0001 force" in msg
-    assert "time not recorded" in msg
+    assert msg.startswith(
+        "I can't confirm when E0001 was pushed, so it is treated as outside "
+        "the 24h reversibility window")
+    assert "is past the" not in msg
+    assert "0.0h ago" not in msg
+
+
+@pytest.mark.parametrize("raw", ["#A47C2 reject", "#A47C2 234", "hello there"],
+                         ids=["reject", "missing_decimals", "unrecognized_nudge"])
+def test_apply_decision_refuses_every_verb_in_mock_mode(
+        env_dir, bridge_server, monkeypatch, capsys, raw):
+    """Directive v1.1.0: nothing in the SUPERVISED tier may be exercised through
+    the mock: not reject, not the missing-decimals nudge, and not the
+    unrecognised-input nudge that advertises '#CODE 12.34' to approve."""
+    monkeypatch.delenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", raising=False)
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    leads_path = env_dir / "state" / "expense-bookkeeper" / "leads.json"
+    before = leads_path.read_bytes()
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH), "--raw-message", raw,
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+
+    assert rc == mod.EXIT_QBO_MOCK_MODE == 20
+    assert leads_path.read_bytes() == before
+    assert stub.requests == []
+    assert _audit_types(env_dir) == []
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["error"] == "qbo_client_mode_mock"

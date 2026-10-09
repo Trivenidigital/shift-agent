@@ -108,6 +108,8 @@ def test_apply_expense_decision_valid_yaml_config_reaches_message_parser(tmp_pat
     monkeypatch.setattr(mod, "LEADS_LOCK", tmp_path / "state" / "expense-bookkeeper" / "leads.json.lock")
     monkeypatch.setattr(mod, "LOG_PATH", tmp_path / "logs" / "decisions.log")
     monkeypatch.setattr(mod, "_bridge_post", lambda jid, msg: sends.append((jid, msg)) or (True, "dry-run"))
+    # The parser nudge is refused in qbo_client_mode "mock" unless a test opts in.
+    monkeypatch.setenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", "1")
     monkeypatch.setattr(sys, "argv", [
         "apply-expense-decision",
         "--raw-message", "not a code",
