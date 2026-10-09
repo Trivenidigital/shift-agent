@@ -67,6 +67,9 @@ def _setup(tmp_path, monkeypatch, build_leads):
 
 
 def _run(mod, monkeypatch, *, raw, sender_phone="+19045550100"):
+    # Reaches the approve/undo handlers, which apply-expense-decision refuses
+    # in qbo_client_mode "mock" unless a test opts in explicitly.
+    monkeypatch.setenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", "1")
     monkeypatch.setattr(mod.sys, "argv",
                         ["apply-expense-decision", "--raw-message", raw,
                          "--sender-phone", sender_phone])

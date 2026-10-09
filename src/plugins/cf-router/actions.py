@@ -4550,6 +4550,17 @@ def is_flyer_enabled() -> bool:
         return False
 
 
+def is_expense_bookkeeper_enabled() -> bool:
+    """Return cfg.expense_bookkeeper.enabled from config.yaml; false on missing config."""
+    try:
+        import yaml  # type: ignore
+        with CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return bool((cfg.get("expense_bookkeeper") or {}).get("enabled"))
+    except Exception:
+        return False
+
+
 def is_flyer_workflow_enabled() -> bool:
     """Return whether Flyer workflow routing should stay wired.
 
