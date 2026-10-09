@@ -179,6 +179,24 @@ def _explicit_qty_allowlisted(chat_id: str, phone: Optional[str] = None) -> bool
     except Exception:  # noqa: BLE001 — a broken gate is a closed gate
         return False
 
+
+# COMPLIANCE MARK-DONE ARM — see _try_compliance_mark_done. DEFAULT OFF: it
+# mutates the owner's compliance calendar. Read at call time; ON only for "1".
+COMPLIANCE_MARK_DONE_ENABLED_ENV = "COMPLIANCE_MARK_DONE_ENABLED"
+
+
+def compliance_mark_done_enabled() -> bool:
+    return os.environ.get(COMPLIANCE_MARK_DONE_ENABLED_ENV, "0") == "1"
+
+
+# The whole visible body must be the token. 40 = ComplianceItem.id max_length.
+_COMPLIANCE_MARK_DONE_RE = re.compile(
+    r"mark\s+(?P<id>[a-z0-9_]{1,40})\s+(?:as\s+)?done[.!]?", re.I)
+# Pronoun-shaped "ids" ("mark it done") are ordinary owner speech, not a
+# compliance token: they fall through before the route row, with no reply.
+_COMPLIANCE_MARK_DONE_STOPWORDS = frozenset(
+    {"it", "as", "this", "that", "them", "all", "one"})
+
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
 # but no longer wired into pre_gateway_dispatch. f7_rescue_check() +
@@ -755,6 +773,13 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             f8_result = _try_f8_intercept(text, chat_id, message_id)
             if f8_result is not None:
                 return f8_result
+
+        # Compliance mark-done — owner token `mark <id> done` → kernel. DORMANT
+        # behind COMPLIANCE_MARK_DONE_ENABLED; when OFF it returns None before
+        # any I/O (byte-identical). After F8 (a token has no #XXXXX code).
+        compliance_result = _try_compliance_mark_done(text, chat_id, message_id)
+        if compliance_result is not None:
+            return compliance_result
 
         # PR-5 automation-control kernel — INBOUND enforcement point (§5.4/§5.5).
         # DORMANT behind CATERING_AUTOMATION_CONTROL_ENABLED + allowlist; when OFF
@@ -1929,6 +1954,152 @@ def _automation_control_send(chat_id: str, text: str, nid: str) -> None:
     except Exception as exc:
         actions.sys.stderr.write(
             f"cf-router: automation-control ack send failed (non-fatal): {exc}\n")
+
+
+# ── Compliance mark-done — owner token → mark-compliance-item-done kernel ─────
+
+# Fixed owner replies. Filled only from the regex-bounded item id and the
+# kernel's own JSON; never model-generated.
+_COMPLIANCE_REPLY_OK_RECURRING = (
+    "Marked {item_id} done (it was due {completed}). Next due date: {next}.")
+_COMPLIANCE_REPLY_OK_ONESHOT = (
+    "Marked {item_id} done (it was due {completed}). It was a one-time item, "
+    "so it is no longer tracked.")
+_COMPLIANCE_REPLY_NOTFOUND = (
+    "I couldn't find a compliance item called {item_id}, so nothing was marked "
+    "done. Ask \"what compliance deadlines do I have?\" to see the item names.")
+_COMPLIANCE_REPLY_RECENT = (
+    "{item_id} was already marked done in the last 15 minutes, so nothing changed.")
+_COMPLIANCE_REPLY_DISABLED = (
+    "Compliance deadline tracking isn't enabled for this business, so nothing "
+    "was marked done.")
+_COMPLIANCE_REPLY_UNCERTAIN = (
+    "I couldn't confirm whether {item_id} was marked done. Please don't rely on "
+    "it yet — ask for your compliance deadlines to check, then try again.")
+
+
+def _compliance_tracking_enabled() -> Optional[bool]:
+    """cfg.compliance.enabled, validated by ComplianceConfig exactly as the
+    kernel validates it; None when config cannot be read or validated."""
+    try:
+        import yaml  # type: ignore
+        actions._ensure_platform_path()
+        from schemas import ComplianceConfig  # type: ignore
+        with actions.CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return ComplianceConfig.model_validate(cfg.get("compliance") or {}).enabled
+    except Exception:
+        return None
+
+
+def _compliance_mark_done_reply(item_id: str, rc: int, stdout: str) -> tuple[str, str]:
+    """Map the kernel result to ``(outcome, reply)``; outcome is one of
+    ok / not_found / recent / uncertain. Only ``ok`` is a verified mark."""
+    if rc == 1:
+        return "not_found", _COMPLIANCE_REPLY_NOTFOUND.format(item_id=item_id)
+    if rc == 3:
+        return "recent", _COMPLIANCE_REPLY_RECENT.format(item_id=item_id)
+    uncertain = ("uncertain", _COMPLIANCE_REPLY_UNCERTAIN.format(item_id=item_id))
+    if rc != 0:
+        # 2 / 124 / 127 / other. A timeout may have mutated state, so this is
+        # never reported as a failure.
+        return uncertain
+    try:
+        payload = json.loads(stdout)
+        completed = payload["completed"]
+    except (ValueError, TypeError, KeyError):
+        return uncertain
+    if not isinstance(completed, str) or not completed:
+        return uncertain
+    if payload.get("deleted") is True:
+        return "ok", _COMPLIANCE_REPLY_OK_ONESHOT.format(
+            item_id=item_id, completed=completed)
+    nxt = payload.get("next")
+    if not isinstance(nxt, str) or not nxt:
+        return uncertain
+    return "ok", _COMPLIANCE_REPLY_OK_RECURRING.format(
+        item_id=item_id, completed=completed, next=nxt)
+
+
+def _try_compliance_mark_done(text: str, chat_id: str, message_id: str) -> Optional[dict]:
+    """Owner sends exactly `mark <id> done` → run mark-compliance-item-done.
+
+    The SKILL that documents this kernel cannot run on the box (`skills`
+    toolset disabled), so without this arm the kernel has no caller. Gates, any
+    miss returning None (routing byte-identical): env flag "1" → token fullmatch
+    → id not a pronoun stopword → owner chat (a non-owner falls through
+    silently). Disabled tracking or
+    unreadable config gets a fixed reply and the kernel is not invoked.
+
+    The dispatcher_routed row is written BEFORE the kernel runs, and from that
+    point this never returns None: the kernel may have mutated state, so the
+    LLM must not also answer the turn.
+    """
+    if not compliance_mark_done_enabled():
+        return None
+    match = _COMPLIANCE_MARK_DONE_RE.fullmatch(actions.flyer_visible_message_text(text))
+    if match is None:
+        return None
+    item_id = match.group("id").lower()
+    if item_id in _COMPLIANCE_MARK_DONE_STOPWORDS:
+        return None
+    if not actions.is_owner_chat(chat_id):
+        return None
+
+    enabled = _compliance_tracking_enabled()
+    if enabled is None:
+        actions.audit_intercepted(
+            reason="error", chat_id=chat_id,
+            detail=f"compliance_mark_done_uncertain; item_id={item_id}; config_unreadable",
+        )
+        _compliance_owner_send(
+            chat_id, _COMPLIANCE_REPLY_UNCERTAIN.format(item_id=item_id), verified=False)
+        return {"action": "skip",
+                "reason": "cf-router: compliance config unreadable; "
+                          "mark-compliance-item-done not invoked"}
+    if not enabled:
+        _compliance_owner_send(chat_id, _COMPLIANCE_REPLY_DISABLED, verified=False)
+        return {"action": "skip",
+                "reason": "cf-router: compliance disabled; "
+                          "mark-compliance-item-done not invoked"}
+
+    actions.audit_dispatcher_routed(
+        message_id=message_id,
+        chat_id=chat_id,
+        routed_to_skill="mark_compliance_item_done",
+        message_shape="text",
+        authority="owner",
+    )
+    try:
+        rc, out, err = actions.invoke_mark_compliance_item_done(item_id)
+    except Exception as exc:  # noqa: BLE001 — past the route row, never None
+        rc, out, err = -1, "", str(exc)
+    outcome, reply = _compliance_mark_done_reply(item_id, rc, out)
+    if outcome == "uncertain":
+        actions.audit_intercepted(
+            reason="error", chat_id=chat_id, subprocess_rc=rc,
+            detail=(f"compliance_mark_done_uncertain; item_id={item_id}; "
+                    f"stdout={str(out)[:300]!r}; stderr={str(err)[:300]!r}"),
+        )
+    _compliance_owner_send(chat_id, reply, verified=(outcome == "ok"))
+    return {"action": "skip",
+            "reason": f"cf-router: invoked mark-compliance-item-done {item_id} (rc={rc})"}
+
+
+def _compliance_owner_send(chat_id: str, text: str, verified: bool) -> None:
+    """Send a fixed compliance reply via the platform send chokepoint. Only a
+    verified mark claims completion. Best-effort — a send failure never
+    regresses a mark the kernel already committed."""
+    try:
+        actions._ensure_platform_path()
+        from safe_io import bridge_post  # type: ignore
+        ctx = build_action_context(
+            action_id="compliance.mark_done", is_regulated_action=False,
+            claims_action_completed=verified, verified_action_result=verified)
+        bridge_post(chat_id, text, action_context=ctx)
+    except Exception as exc:
+        actions.sys.stderr.write(
+            f"cf-router: compliance mark-done reply send failed (non-fatal): {exc}\n")
 
 
 def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str]) -> Optional[dict]:

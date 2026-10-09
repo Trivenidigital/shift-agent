@@ -254,6 +254,23 @@ def test_window_argument_narrows_and_is_clamped(env):
     assert json.loads(_tool().handler({"window_days": "abc"}))["window_days"] == 90
 
 
+@linux_only
+def test_read_tool_hint_only_when_flag_set(env, monkeypatch):
+    """The mark-done hint follows cf-router's arm flag: while the arm is dormant
+    a hint would invite the model to answer the token itself."""
+    _seed(env, [_item("health_inspect", "2026-08-20")])
+    monkeypatch.delenv("COMPLIANCE_MARK_DONE_ENABLED", raising=False)
+    assert "to_mark_done" not in json.loads(_tool().handler({}))
+    monkeypatch.setenv("COMPLIANCE_MARK_DONE_ENABLED", "0")
+    assert "to_mark_done" not in json.loads(_tool().handler({}))
+    monkeypatch.setenv("COMPLIANCE_MARK_DONE_ENABLED", "1")
+    out = json.loads(_tool().handler({}))
+    assert out["to_mark_done"] == "The owner must send exactly: mark <id> done"
+    assert out["source_status"] == "populated"
+    # The description forbids a completion claim regardless of the flag.
+    assert "never say an item was marked done" in _tool().DESCRIPTION
+
+
 # ── result contract ────────────────────────────────────────────────────────
 
 @linux_only
@@ -340,8 +357,9 @@ def test_register_uses_package_relative_imports_and_registers_the_tool(env):
 
 
 @linux_only
-def test_result_contains_no_prose(env):
+def test_result_contains_no_prose(env, monkeypatch):
     """The handler owns facts; Hermes owns wording."""
+    monkeypatch.delenv("COMPLIANCE_MARK_DONE_ENABLED", raising=False)
     _seed(env, [_item("health_inspect", "2026-08-20")])
     out = json.loads(_tool().handler({}))
     assert set(out) == {"ok", "source_status", "window_days", "tracked_total",

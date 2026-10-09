@@ -529,6 +529,77 @@ class TestMarkDone:
         after = (fixture_dir / "state" / "compliance-items.json").read_text()
         assert before == after
 
+    def test_double_mark_within_window_refused_store_advanced_once(self, fixture_dir):
+        """Each call advances one cycle, so a repeated owner message used to
+        skip a whole cycle. The second mark inside the window exits 3."""
+        items_path = fixture_dir / "state" / "compliance-items.json"
+        first = _run_mark(fixture_dir, item_id="health_inspect_houston")
+        assert first.returncode == 0
+        assert json.loads(items_path.read_text())["items"][0]["renewal_date"] == "2027-09-01"
+        prev_ts = [e for e in _read_audit_log(fixture_dir)
+                   if e.get("type") == "compliance_item_marked_done"][0]["ts"]
+
+        second = _run_mark(fixture_dir, item_id="health_inspect_houston")
+        assert second.returncode == 3
+        out = json.loads(second.stdout)
+        assert out == {"error": "recently_marked_done",
+                       "item_id": "health_inspect_houston", "previous_ts": prev_ts}
+        # Advanced exactly once, and no second audit row.
+        assert json.loads(items_path.read_text())["items"][0]["renewal_date"] == "2027-09-01"
+        marked = [e for e in _read_audit_log(fixture_dir)
+                  if e.get("type") == "compliance_item_marked_done"]
+        assert len(marked) == 1
+
+        dry = _run_mark(fixture_dir, item_id="health_inspect_houston", dry_run=True)
+        assert dry.returncode == 3
+        assert json.loads(dry.stdout)["error"] == "recently_marked_done"
+
+    def test_marked_done_row_written_inside_items_lock(self):
+        """The guard reads the marked-done row under the items lock, so the row
+        must be written under that same lock — otherwise two concurrent marks
+        both pass the guard. Pinned structurally: the append of the
+        ComplianceItemMarkedDone entry lives inside `with FileLock(items_lock)`."""
+        import ast
+        tree = ast.parse(MARK_SCRIPT.read_text(encoding="utf-8"))
+        items_lock_blocks = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.With) and any(
+                isinstance(item.context_expr, ast.Call)
+                and getattr(item.context_expr.func, "id", "") == "FileLock"
+                and getattr(item.context_expr.args[0], "id", "") == "items_lock"
+                for item in node.items)
+        ]
+        assert len(items_lock_blocks) == 1
+
+        def _names(node):
+            return {getattr(n, "id", getattr(n, "attr", None)) for n in ast.walk(node)}
+
+        inside = _names(items_lock_blocks[0])
+        assert "ComplianceItemMarkedDone" in inside
+        assert "_append_best_effort" in inside
+        # ...and nowhere outside the lock.
+        func = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+        outside = [n for n in func.body if n is not items_lock_blocks[0]]
+        assert not any("ComplianceItemMarkedDone" in _names(n) for n in outside)
+
+    def test_mark_outside_window_or_other_item_not_refused(self, fixture_dir):
+        """The guard is scoped to the same item_id and the window; garbage lines
+        in the log tail are tolerated."""
+        log = fixture_dir / "logs" / "decisions.log"
+        log.write_text(
+            "not json\n"
+            + json.dumps({"type": "compliance_item_marked_done", "item_id": "other_item",
+                          "ts": "2026-05-31T08:59:00-04:00"}) + "\n"
+            + json.dumps({"type": "compliance_item_marked_done",
+                          "item_id": "health_inspect_houston",
+                          "ts": "2026-05-31T08:40:00-04:00"}) + "\n",
+            encoding="utf-8",
+        )
+        r = _run_mark(fixture_dir, item_id="health_inspect_houston",
+                      now_override="2026-05-31T09:00:00-04:00")
+        assert r.returncode == 0, r.stdout + r.stderr
+
     def test_missing_items_file_recreated(self, fixture_dir):
         (fixture_dir / "state" / "compliance-items.json").unlink()
         r = _run_mark(fixture_dir, item_id="anything")

@@ -98,6 +98,7 @@ DERIVE_FLYER_BRAND_STYLE_BIN = Path("/usr/local/bin/derive-flyer-brand-style")
 MANAGE_FLYER_ACCOUNT_BIN = Path("/usr/local/bin/manage-flyer-account")
 MANAGE_FLYER_GUEST_ORDER_BIN = Path("/usr/local/bin/manage-flyer-guest-order")
 CHECK_FLYER_REFERENCE_SCOPE_BIN = Path("/usr/local/bin/check-flyer-reference-scope")
+MARK_COMPLIANCE_ITEM_DONE_BIN = Path("/usr/local/bin/mark-compliance-item-done.py")
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
@@ -2487,6 +2488,30 @@ def invoke_shift_sick_call(*, chat_id: str, text: str, message_id: str) -> tuple
                 "--chat-id", chat_id,
                 "--message-text", text,
                 "--message-id", message_id,
+            ],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def invoke_mark_compliance_item_done(item_id: str) -> tuple[int, str, str]:
+    """Run the Compliance-owned mark-done kernel for an owner token.
+
+    The kernel owns the locks, the date math, sentinel GC, the recent-mark guard
+    (exit 3) and the `compliance_item_marked_done` row. Returns (rc, stdout,
+    stderr) verbatim so the caller reads its documented exit codes.
+    """
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(MARK_COMPLIANCE_ITEM_DONE_BIN),
+                "--item-id", item_id,
+                "--actor", "owner",
             ],
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
