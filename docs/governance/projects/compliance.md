@@ -1,6 +1,6 @@
 # Compliance Calendar — Project Directive
 
-    Version: 1.0.0
+    Version: 1.1.0
     Status:  Mandatory
     Level:   3 (project)
     Project id: compliance
@@ -20,8 +20,17 @@ gate; answer owner queries about what is due. Driven by
 ## Hermes capability — reuse
 
 Understanding the owner's free-text query ("what's due this month", "mark the
-health permit done") and phrasing the reminder. Deployed in
-`skills/compliance_owner_query/`.
+health permit done") and phrasing the reminder. Reachable in production through
+the `get_compliance_deadlines` tool in `src/plugins/shift-agent-read/` (Hermes
+Tool Search). `skills/compliance_owner_query/` documents the same contract but
+is not an execution path on a box whose gateway disables the `skills` and
+`terminal` toolsets.
+
+The only deterministic caller of `scripts/mark-compliance-item-done.py` is the
+cf-router owner-token arm (`src/plugins/cf-router/hooks.py`,
+`_try_compliance_mark_done`): the owner's exact `mark <id> done` for a
+configured item id, dormant behind `COMPLIANCE_MARK_DONE_ENABLED`. Hermes may
+tell the owner the token; it never triggers the mutation.
 
 ## Deterministic kernels — reuse
 
@@ -70,4 +79,5 @@ legal advice is a product-scope escalation, not a code fix.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-10-09 | Name the production-reachable surfaces: the `get_compliance_deadlines` read tool (Hermes Tool Search) and the cf-router owner-token arm as the sole deterministic caller of `mark-compliance-item-done.py`; the `compliance_owner_query` SKILL is documentation, not an execution path. |
 | 1.0.0 | 2026-08-01 | Initial Compliance directive. |

@@ -583,6 +583,40 @@ class TestMarkDone:
         outside = [n for n in func.body if n is not items_lock_blocks[0]]
         assert not any("ComplianceItemMarkedDone" in _names(n) for n in outside)
 
+    def test_future_dated_row_does_not_block(self, fixture_dir):
+        """A clock-drifted or hand-written row stamped AFTER now is not a recent
+        mark; trusting it would refuse every mark until the clock caught up."""
+        (fixture_dir / "logs" / "decisions.log").write_text(
+            json.dumps({"type": "compliance_item_marked_done",
+                        "item_id": "health_inspect_houston",
+                        "ts": "2026-05-31T09:05:00-04:00"}) + "\n",
+            encoding="utf-8",
+        )
+        r = _run_mark(fixture_dir, item_id="health_inspect_houston",
+                      now_override="2026-05-31T09:00:00-04:00")
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_recent_row_at_end_of_large_log_refuses(self, fixture_dir):
+        """The guard reads a bounded tail. A log far larger than the read window
+        whose matching row is in its last lines must still refuse."""
+        log = fixture_dir / "logs" / "decisions.log"
+        filler = json.dumps({"type": "dispatcher_routed", "message_id": "m",
+                             "pad": "x" * 200}) + "\n"
+        with log.open("w", encoding="utf-8") as fh:
+            while fh.tell() < 400 * 1024:
+                fh.write(filler)
+            fh.write(json.dumps({"type": "compliance_item_marked_done",
+                                 "item_id": "health_inspect_houston",
+                                 "ts": "2026-05-31T08:59:00-04:00"}) + "\n")
+            fh.write(filler)
+        assert log.stat().st_size > 256 * 1024
+        before = (fixture_dir / "state" / "compliance-items.json").read_text()
+        r = _run_mark(fixture_dir, item_id="health_inspect_houston",
+                      now_override="2026-05-31T09:00:00-04:00")
+        assert r.returncode == 3, r.stdout + r.stderr
+        assert json.loads(r.stdout)["previous_ts"] == "2026-05-31T08:59:00-04:00"
+        assert (fixture_dir / "state" / "compliance-items.json").read_text() == before
+
     def test_mark_outside_window_or_other_item_not_refused(self, fixture_dir):
         """The guard is scoped to the same item_id and the window; garbage lines
         in the log tail are tolerated."""
