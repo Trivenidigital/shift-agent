@@ -85,6 +85,16 @@ def _opt_in_bridge_sends(monkeypatch):
     monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_mock_qbo_push(monkeypatch):
+    """apply-expense-decision refuses approve/undo when qbo_client_mode is
+    "mock" (the mock must never surface as a QuickBooks success). These tests
+    exercise the real push/undo code against the mock client, so they opt in
+    explicitly; the refusal itself is pinned by the *_mock_mode tests, which
+    delete this env var."""
+    monkeypatch.setenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", "1")
+
+
 @pytest.fixture
 def bridge_server():
     _BridgeStub.requests = []
@@ -608,3 +618,87 @@ def test_in_flight_push_not_flagged_as_orphan(env_dir, bridge_server):
 
     types = _audit_types(env_dir)
     assert "expense_orphan_detected" not in types
+
+
+# ───────────────────────────────────────────────────
+# Mock-mode guard — the mock QBO push must never reach the owner as a
+# QuickBooks success (expense-bookkeeper directive, presumed NO-GO).
+# ───────────────────────────────────────────────────
+
+def test_apply_decision_refuses_push_in_mock_mode_without_test_override(
+        env_dir, bridge_server, monkeypatch, capsys):
+    monkeypatch.delenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", raising=False)
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    leads_path = env_dir / "state" / "expense-bookkeeper" / "leads.json"
+    before = leads_path.read_bytes()
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "#A47C2 234.50",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+
+    assert rc == mod.EXIT_QBO_MOCK_MODE == 20
+    assert leads_path.read_bytes() == before
+    assert stub.requests == []
+    assert _audit_types(env_dir) == []
+    assert not (env_dir / "state" / "expense-bookkeeper"
+                / "mock-qbo-pushed.json").exists()
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["error"] == "qbo_client_mode_mock"
+    assert out["detail"]
+
+
+def test_apply_decision_refuses_undo_in_mock_mode(
+        env_dir, bridge_server, monkeypatch, capsys):
+    monkeypatch.delenv("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS", raising=False)
+    port, stub = bridge_server
+    pushed_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    _seed_lead(env_dir, status="PUSHED",
+               qbo_transaction_id="MOCK-E0001-1",
+               pushed_at=pushed_at,
+               owner_confirmed_total_cents=23450)
+    _seed_mock_qbo_ledger(env_dir, "MOCK-E0001-1", 23450)
+    leads_path = env_dir / "state" / "expense-bookkeeper" / "leads.json"
+    before = leads_path.read_bytes()
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "undo E0001",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+
+    assert rc == mod.EXIT_QBO_MOCK_MODE
+    assert leads_path.read_bytes() == before
+    assert stub.requests == []
+    assert _audit_types(env_dir) == []
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["error"] == "qbo_client_mode_mock"
+
+
+def test_undo_missing_pushed_at_is_outside_window(env_dir, bridge_server):
+    """A PUSHED lead with no pushed_at cannot prove it is inside the window;
+    it must require force, not be treated as 0h old."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, status="PUSHED",
+               qbo_transaction_id="MOCK-E0001-1",
+               owner_confirmed_total_cents=23450)
+    _seed_mock_qbo_ledger(env_dir, "MOCK-E0001-1", 23450)
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "undo E0001",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+
+    assert rc == mod.EXIT_OUTSIDE_WINDOW
+    leads = json.loads((env_dir / "state" / "expense-bookkeeper" / "leads.json").read_text())
+    assert leads["leads"][0]["status"] == "PUSHED"
+    entries = [e for e in _read_audit(env_dir)
+               if e["type"] == "expense_reversal_requested"]
+    assert entries[0]["within_window"] is False
+    assert "expense_reversed" not in _audit_types(env_dir)
+    msg = stub.requests[-1].get("message", "")
+    assert "undo E0001 force" in msg
+    assert "time not recorded" in msg

@@ -5897,12 +5897,80 @@ _RECEIPT_INGESTION_FAILED_TEXT = (
     "Please re-send it, ideally a straight-on photo with the total in focus."
 )
 
+# extract-receipt failures that are NOT about the photo must not blame it.
+# rc 3 = expense_bookkeeper disabled, rc 6 = vision provider unavailable;
+# rc 124 (timeout) depends on whether a draft was persisted anyway, see
+# `_receipt_failure_text`. Every other rc keeps the generic text above.
+_RECEIPT_FAILURE_HEADER = "⚕ *Expense Bookkeeper*\n────────────\n"
+_RECEIPT_DISABLED_TEXT = (
+    _RECEIPT_FAILURE_HEADER
+    + "Expense bookkeeping isn't enabled for this business, so the receipt "
+      "was not recorded."
+)
+_RECEIPT_PROVIDER_DOWN_TEXT = (
+    _RECEIPT_FAILURE_HEADER
+    + "I couldn't reach the receipt-reading service just now, so nothing was "
+      "recorded. Please try again later."
+)
+_RECEIPT_TIMEOUT_DRAFT_SAVED_TEXT = (
+    _RECEIPT_FAILURE_HEADER
+    + "The receipt took too long to process. It was saved for review, but I "
+      "couldn't send the summary — ask me for your pending expense drafts."
+)
+_RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT = (
+    _RECEIPT_FAILURE_HEADER
+    + "The receipt took too long to process and nothing was recorded. "
+      "Please re-send it."
+)
+
 
 def _expense_leads_path():
     """Expense store, derived from the state dir this plugin is configured for
     (tests patch `actions.LEADS_PATH`), so verification reads the SAME file the
     extractor wrote."""
     return actions.LEADS_PATH.parent / "expense-bookkeeper" / "leads.json"
+
+
+def _receipt_failure_text(rc: int, message_id: str) -> str:
+    """Owner copy for a failed ingestion, keyed on extract-receipt's rc.
+
+    A timeout (124) is ambiguous: the subprocess may have persisted the draft
+    before it was killed. The durable store decides — a DRAFTED lead carrying
+    this message id means the receipt WAS saved, only the card was lost."""
+    if rc == 3:
+        return _RECEIPT_DISABLED_TEXT
+    if rc == 6:
+        return _RECEIPT_PROVIDER_DOWN_TEXT
+    if rc == 124:
+        try:
+            doc = json.loads(_expense_leads_path().read_text(encoding="utf-8"))
+            saved = any(
+                l.get("original_message_id") == message_id
+                and l.get("status") == "DRAFTED"
+                for l in (doc.get("leads") or [])
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            saved = False
+        return (_RECEIPT_TIMEOUT_DRAFT_SAVED_TEXT if saved
+                else _RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT)
+    return _RECEIPT_INGESTION_FAILED_TEXT
+
+
+def _send_receipt_failure(chat_id: str, text: str) -> None:
+    """Send failure copy. Claims nothing and asserts no verified result."""
+    actions.send_flyer_text(
+        chat_id, text,
+        action_context=build_action_context(
+            action_id="expense.receipt.ingestion_failed",
+            is_regulated_action=False,
+            verified_action_result=False,
+            claims_action_completed=False,
+            # Nothing was mutated, so no mutation class. The previous literal
+            # "none" is not a valid value: ActionExecutionContext raised
+            # ValidationError and the owner received no reply at all.
+            mutation_class=None,
+        ),
+    )
 
 
 def _owner_receipt_ingestion_impl(
@@ -5932,6 +6000,22 @@ def _owner_receipt_ingestion_impl(
         )
     except Exception:
         pass  # telemetry only — never block the action
+
+    # The owner explicitly asked for a receipt action, so a disabled agent still
+    # claims the turn and refuses truthfully, without running the extractor.
+    # Not checked in `_is_owner_receipt_candidate`: the brand-asset arm yields
+    # on that snapshot, and clearing it would let a disabled-agent receipt be
+    # stored as a Flyer brand asset (B0009). Falling through instead would hand
+    # the receipt to the later flyer arms or the LLM to misclassify.
+    if not actions.is_expense_bookkeeper_enabled():
+        actions.audit_intercepted(
+            reason="receipt_ingestion_failed", chat_id=chat_id,
+            detail=f"sender_role={role}; expense_bookkeeper_enabled=false; "
+                   f"no extractor run",
+        )
+        _send_receipt_failure(chat_id, _RECEIPT_DISABLED_TEXT)
+        return {"action": "skip",
+                "reason": "cf-router receipt ingestion refused (agent disabled)"}
 
     sender_lid = chat_id if str(chat_id).endswith("@lid") else ""
     rc, out, err = actions.invoke_extract_receipt(
@@ -5973,16 +6057,7 @@ def _owner_receipt_ingestion_impl(
             detail=f"sender_role={role}; expense_id={expense_id or '-'}; "
                    f"verified={verified}; err={err[:120]}",
         )
-        actions.send_flyer_text(
-            chat_id, _RECEIPT_INGESTION_FAILED_TEXT,
-            action_context=build_action_context(
-                action_id="expense.receipt.ingestion_failed",
-                is_regulated_action=False,
-                verified_action_result=True,
-                claims_action_completed=False,
-                mutation_class="none",
-            ),
-        )
+        _send_receipt_failure(chat_id, _receipt_failure_text(rc, message_id))
         return {"action": "skip",
                 "reason": f"cf-router receipt ingestion failed (rc={rc})"}
 

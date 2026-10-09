@@ -143,6 +143,8 @@ def _gate(hooks_mod, monkeypatch, *, text, media, role, owner_capability=None):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: owner_capability, raising=False)
+    monkeypatch.setattr(hooks_mod.actions, "is_expense_bookkeeper_enabled",
+                        lambda: True)
     candidate = hooks_mod._is_owner_receipt_candidate(
         text, "chat@lid", media_path=media)
     return hooks_mod._receipt_caption_cedes_to_dispatcher(
@@ -207,6 +209,8 @@ def test_gate_consults_membership_exactly_once(plugin, monkeypatch):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: calls.append(chat_id) or True, raising=False)
+    monkeypatch.setattr(hooks_mod.actions, "is_expense_bookkeeper_enabled",
+                        lambda: True)
     candidate = hooks_mod._is_owner_receipt_candidate(
         "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg")
     assert hooks_mod._receipt_caption_cedes_to_dispatcher(
@@ -483,7 +487,8 @@ LIVE_CAPTION = "Expense receipt — review this"
 
 def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
                   owner_capability=True, caption=LIVE_CAPTION,
-                  media=LIVE_MEDIA, extract_rc=0):
+                  media=LIVE_MEDIA, extract_rc=0, expense_enabled=True,
+                  extract_out=None, leads_rows=None):
     """Wire the live failure shape and return the recorders."""
     rec = {"brand_asset": [], "audits": [], "sends": [], "extract": [],
            "dispatcher_routed": []}
@@ -496,6 +501,8 @@ def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
                         lambda c: (LIVE_PHONE, "employee"))
     monkeypatch.setattr(actions_mod, "has_owner_capability",
                         lambda c: owner_capability)
+    monkeypatch.setattr(actions_mod, "is_expense_bookkeeper_enabled",
+                        lambda: expense_enabled)
     # The stale active flyer project is what made the brand-asset arm fire.
     monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender",
                         lambda p, c: {"project_id": "F0226", "status": "revising_design"})
@@ -517,21 +524,24 @@ def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
 
     def _send(chat_id, text, **kw):
         rec["sends"].append(text)
+        rec.setdefault("send_contexts", []).append(kw.get("action_context"))
         return True, "mid1", ""
     monkeypatch.setattr(actions_mod, "send_flyer_text", _send)
 
     card = ("*Expense Bookkeeper*\nVendor: Costco\nTotal: $42.17\n\n"
             "Review only — this expense has not been posted to QuickBooks.")
     leads = tmp_path / "leads.json"
-    leads.write_text(json.dumps({"leads": [
-        {"expense_id": "E0001", "status": "DRAFTED", "owner_approval_code": None}]}),
-        encoding="utf-8")
+    if leads_rows is None:
+        leads_rows = [{"expense_id": "E0001", "status": "DRAFTED",
+                       "owner_approval_code": None}]
+    leads.write_text(json.dumps({"leads": leads_rows}), encoding="utf-8")
     monkeypatch.setattr(hooks_mod, "_expense_leads_path", lambda: leads)
 
     def _extract(**kw):
         rec["extract"].append(kw)
-        return extract_rc, json.dumps(
-            {"expense_id": "E0001", "approval_card_text": card}), ""
+        out = (json.dumps({"expense_id": "E0001", "approval_card_text": card})
+               if extract_out is None else extract_out)
+        return extract_rc, out, ""
     monkeypatch.setattr(actions_mod, "invoke_extract_receipt", _extract)
 
     event = SimpleNamespace(text=caption, chat_id=LIVE_CHAT,
@@ -629,3 +639,89 @@ def test_turn_snapshot_survives_a_transient_identity_failure(plugin, monkeypatch
     assert rec["brand_asset"] == [], "brand asset written after a receipt candidate"
     assert "receipt_caption_ceded_to_dispatcher" in reasons, reasons
     assert len(rec["extract"]) == 1, rec["extract"]
+
+
+# ── truthful failure copy + disabled-agent fall-through ─────────────────────
+
+def _ctx_get(ctx, key):
+    if isinstance(ctx, dict):
+        return ctx.get(key)
+    return getattr(ctx, key)
+
+
+@pytest.mark.parametrize("rc,leads_rows,expected_attr", [
+    (3, [], "_RECEIPT_DISABLED_TEXT"),
+    (6, [], "_RECEIPT_PROVIDER_DOWN_TEXT"),
+    (124, [], "_RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT"),
+    (124, [{"expense_id": "E0001", "status": "DRAFTED",
+            "original_message_id": "wamid.LIVE"}],
+     "_RECEIPT_TIMEOUT_DRAFT_SAVED_TEXT"),
+    (5, [], "_RECEIPT_INGESTION_FAILED_TEXT"),
+], ids=["disabled", "provider_down", "timeout_nothing", "timeout_draft_saved",
+        "other"])
+def test_failure_copy_by_rc(plugin, monkeypatch, tmp_path, rc, leads_rows,
+                            expected_attr):
+    """A failure that is not about the photo must not blame the photo, and no
+    failure send may claim the action completed."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
+                               extract_rc=rc, extract_out="",
+                               leads_rows=leads_rows)
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    expected = getattr(hooks_mod, expected_attr)
+    assert rec["sends"] == [expected]
+    reasons = [a.get("reason") for a in rec["audits"]]
+    assert "receipt_ingestion_failed" in reasons, reasons
+    assert "receipt_drafted" not in reasons, reasons
+    ctx = rec["send_contexts"][-1]
+    assert _ctx_get(ctx, "claims_action_completed") is False
+    assert _ctx_get(ctx, "verified_action_result") is False
+    if expected_attr != "_RECEIPT_INGESTION_FAILED_TEXT":
+        assert "could not read" not in expected.lower()
+
+
+def test_timeout_draft_lookup_ignores_other_messages_drafts(plugin, monkeypatch,
+                                                            tmp_path):
+    """Only a DRAFTED lead for THIS message id proves the timed-out receipt was
+    saved; another message's draft must not be reported as this one."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(
+        hooks_mod, actions_mod, monkeypatch, tmp_path, extract_rc=124,
+        extract_out="",
+        leads_rows=[{"expense_id": "E0009", "status": "DRAFTED",
+                     "original_message_id": "wamid.OTHER"}])
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    assert rec["sends"] == [hooks_mod._RECEIPT_TIMEOUT_NOTHING_RECORDED_TEXT]
+
+
+def test_disabled_agent_claims_turn_with_disabled_copy_no_subprocess(
+        plugin, monkeypatch, tmp_path):
+    """The owner explicitly asked for a receipt action: a disabled agent claims
+    the turn and says so truthfully — no extractor, no lead, no brand asset
+    (B0009 stays closed because the candidate snapshot is untouched)."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
+                               expense_enabled=False)
+    leads = tmp_path / "leads.json"
+    before = leads.read_bytes()
+
+    result = hooks_mod._pre_gateway_dispatch_impl(event)
+
+    assert result["action"] == "skip", result
+    assert rec["sends"] == [hooks_mod._RECEIPT_DISABLED_TEXT]
+    assert rec["sends"][0].endswith(
+        "Expense bookkeeping isn't enabled for this business, so the receipt "
+        "was not recorded.")
+    ctx = rec["send_contexts"][-1]
+    assert _ctx_get(ctx, "claims_action_completed") is False
+    assert _ctx_get(ctx, "verified_action_result") is False
+    assert rec["extract"] == [], "disabled agent ran the extractor"
+    assert rec["brand_asset"] == [], "disabled-agent receipt stored as brand asset"
+    assert leads.read_bytes() == before, "disabled agent wrote a lead"
+    reasons = [a.get("reason") for a in rec["audits"]]
+    assert "receipt_ingestion_failed" in reasons, reasons
+    assert "receipt_drafted" not in reasons, reasons

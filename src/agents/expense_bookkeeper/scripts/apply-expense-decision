@@ -27,6 +27,10 @@ Exit codes:
   8  — undo outside reversibility window (force-instruction sent)
   9  — illegal status transition (reconcile_required set, owner notified)
  10  — QBO push failure (status PUSH_FAILED, owner notified)
+ 20  — approve/undo refused: qbo_client_mode is "mock" (no state change, no
+       owner message; JSON error on stdout). The mock must never surface as a
+       QuickBooks success. Tests opt past this with
+       EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS=1.
 """
 from __future__ import annotations
 
@@ -82,6 +86,7 @@ MOCK_QBO_STATE_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/mock-qbo-p
 EXIT_AMOUNT_MISMATCH = 7
 EXIT_OUTSIDE_WINDOW = 8
 EXIT_PUSH_FAILED = 10
+EXIT_QBO_MOCK_MODE = 20  # 11-19 are taken in shared exit_codes.py
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -652,8 +657,13 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
             pushed_at = datetime.fromisoformat(pushed_at)
         if pushed_at and pushed_at.tzinfo is None:
             pushed_at = pushed_at.replace(tzinfo=timezone.utc)
+        # A lead with no pushed_at cannot prove it is inside the window, so it
+        # is treated as outside-window (force required), never as 0h old.
         hours_since = ((now - pushed_at).total_seconds() / 3600.0) if pushed_at else 0.0
-        within_window = hours_since <= cfg.expense_bookkeeper.reversibility_window_hours
+        within_window = (
+            pushed_at is not None
+            and hours_since <= cfg.expense_bookkeeper.reversibility_window_hours
+        )
         _log(ExpenseReversalRequested(
             ts=datetime.now(timezone.utc),
             type="expense_reversal_requested",
@@ -669,8 +679,10 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
                 "expense_undo_outside_window.txt",
                 expense_id=eid,
                 window_hours=window_hours,
-                pushed_at_display=pushed_at.isoformat() if pushed_at else "?",
-                hours_since_push_display=f"{hours_since:.1f}",
+                pushed_at_display=(pushed_at.isoformat() if pushed_at
+                                   else "time not recorded"),
+                hours_since_push_display=(f"{hours_since:.1f}" if pushed_at
+                                          else "?"),
             )
             _bridge_post(owner_jid, msg)
             return EXIT_OUTSIDE_WINDOW
@@ -794,6 +806,20 @@ def main():
         return EXIT_INVALID_INPUT
 
     verb = parsed["verb"]
+    # Directive NO-GO: the mock QBO push must never surface to the owner as a
+    # QuickBooks success. Refuse approve/undo before any state transition or
+    # send; only tests may exercise the push/undo code against the mock.
+    if (verb in ("approve", "undo")
+            and cfg.expense_bookkeeper.qbo_client_mode == "mock"
+            and os.environ.get("EXPENSE_ALLOW_MOCK_PUSH_FOR_TESTS") != "1"):
+        print(json.dumps({
+            "error": "qbo_client_mode_mock",
+            "detail": (f"{verb} refused: qbo_client_mode is 'mock'; no "
+                       "QuickBooks write can occur, so nothing was changed "
+                       "and no owner message was sent"),
+        }))
+        return EXIT_QBO_MOCK_MODE
+
     if verb == "approve":
         return _handle_approve(parsed, owner_phone, owner_jid, args.sender_phone,
                                args.raw_message, cfg, customer_tz)
