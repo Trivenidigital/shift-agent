@@ -202,3 +202,29 @@ def test_final_logo_change_after_binding_check_is_refused(tmp_path, monkeypatch)
     monkeypatch.setattr(render, "_render_premium_overlay_with_fallback", changed_compositor)
     with pytest.raises(FlyerRenderError, match="quality check.*owned logo"):
         render_final_package(project, tmp_path / "finals")
+
+def test_owned_logo_provenance_survives_all_final_formats(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from PIL import Image
+    from agents.flyer import render
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    logo = tmp_path / "owned.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    logo_sha = hashlib.sha256(logo.read_bytes()).hexdigest()
+    asset = SimpleNamespace(kind="logo", notes="our logo", path=str(logo), sha256=logo_sha)
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda _: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda _: True)
+    render._apply_critical_text_overlay(project, raw, preview, size=(1080, 1350), output_format="concept_preview")
+    project.assets[0].sha256 = hashlib.sha256(preview.read_bytes()).hexdigest()
+    render.write_text_manifest(project, preview, output_format="concept_preview", selected_concept_id="C1", source_path=raw)
+    finals = render_final_package(project, tmp_path / "finals")
+    assert len(finals) == 4
+    for spec in finals:
+        assert json.loads(render._text_manifest_path(spec.path).read_text())["owned_logo_sha256"] == logo_sha
+    assert hashlib.sha256(logo.read_bytes()).hexdigest() == logo_sha
