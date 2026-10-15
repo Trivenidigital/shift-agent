@@ -433,7 +433,7 @@ _FIXED_PREMIUM_HERO_DIRECTIVE = (
     "vibrant, and atmospheric.\n"
     "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
     "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
-    "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+    "advertisement layout.\n"
     "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
     "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
     "do NOT leave empty flat bands or blank panels.\n"
