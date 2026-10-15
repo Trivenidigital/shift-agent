@@ -6891,6 +6891,324 @@ def test_revision_clarification_reply_includes_request_excerpt_to_avoid_dedupe(m
     assert "F0048" not in sent[0]
 
 
+def _owner_yield_harness(monkeypatch, *, role="employee", owner=True, update_doc=None, project_extra=None):
+    """F0229 (2026-10-15): owner on an open flyer project in
+    awaiting_final_approval; update-flyer-project stubbed to an unmatched,
+    no-change revision unless `update_doc` overrides it.
+
+    Realistic production identity: the live owner is dual-role (roles
+    [employee, owner]), so identify-sender's legacy scalar `role` reads
+    "employee" while owner authority (`is_owner_chat`) is True."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0229",
+        "customer_phone": "+15550100009",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Spice Kitchen", "contact_info": "+15550100009"},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+        **(project_extra or {}),
+    }
+    doc = update_doc or {
+        "project_id": "F0229",
+        "version": 2,
+        "revision_requires_clarification": True,
+        "revision_patch": {
+            "changed": False,
+            "visual_only": False,
+            "ambiguous": False,
+            "already_applied": False,
+            "unresolved_reason": "I could not match that change to the current flyer details.",
+        },
+    }
+    rec = {"update_calls": [], "sent": [], "audits": []}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+15550100009", role))
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _c: owner)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0009", "status": "active"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *args: rec["update_calls"].append(args) or (True, json.dumps(doc)))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: rec["sent"].append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _pid: (True, "generated"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: rec["audits"].append(kwargs))
+    return hooks, rec
+
+
+def _owner_yield_audits(rec):
+    return [a for a in rec["audits"] if "owner_yielded=true" in str(a.get("detail") or "")]
+
+
+def test_owner_non_revision_question_on_open_flyer_yields_without_clarification(monkeypatch):
+    hooks, rec = _owner_yield_harness(monkeypatch)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "What catering approvals are pending?",
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-catering-question"},
+    )
+
+    assert result is None
+    assert rec["sent"] == []
+    assert len(rec["update_calls"]) == 1
+    yielded = _owner_yield_audits(rec)
+    assert len(yielded) == 1
+    assert yielded[0]["reason"] == "flyer_active_project_bypassed"
+    assert "yield_reason=non_revision_clarification" in yielded[0]["detail"]
+    assert "project_id=F0229" in yielded[0]["detail"]
+    assert "owner_capability=true" in yielded[0]["detail"]
+    assert "sender_role=employee" in yielded[0]["detail"]
+
+
+@pytest.mark.parametrize("text", [
+    "any catering orders pending",
+    "show me pending catering quotes",
+    "how many catering leads this week",
+    "catering status?",
+])
+def test_owner_catering_query_on_open_flyer_yields(monkeypatch, text):
+    hooks, rec = _owner_yield_harness(monkeypatch)
+
+    result = hooks._try_flyer_active_project_intercept(
+        text,
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-catering-query"},
+    )
+
+    assert result is None
+    assert rec["sent"] == []
+    yielded = _owner_yield_audits(rec)
+    assert len(yielded) == 1
+    assert "domain=catering" in yielded[0]["detail"]
+
+
+@pytest.mark.parametrize("text", ["#ABCDE approve", "approve #ABCDE", "#ABCDE reject"])
+def test_owner_approval_code_declined_by_f8_yields_before_update_subprocess(monkeypatch, text):
+    hooks, rec = _owner_yield_harness(monkeypatch)
+
+    result = hooks._try_flyer_active_project_intercept(
+        text,
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-stale-code"},
+    )
+
+    assert result is None
+    assert rec["update_calls"] == []
+    assert rec["sent"] == []
+    yielded = _owner_yield_audits(rec)
+    assert len(yielded) == 1
+    assert "yield_reason=approval_code_token" in yielded[0]["detail"]
+    assert "owner_capability=true" in yielded[0]["detail"]
+
+
+@pytest.mark.parametrize("role", ["customer", "employee"])
+def test_non_owner_question_still_gets_flyer_clarification(monkeypatch, role):
+    hooks, rec = _owner_yield_harness(monkeypatch, role=role, owner=False)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "What catering approvals are pending?",
+        "15550100009@s.whatsapp.net",
+        {"message_id": "customer-catering-question"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0229"}
+    assert len(rec["sent"]) == 1
+    assert rec["sent"][0].startswith("I need one clarification before regenerating")
+    assert _owner_yield_audits(rec) == []
+
+
+def test_owner_pending_confirmation_message_is_still_sent(monkeypatch):
+    pending_message = "Flyer Studio\n------------\nThat change confirmation expired. Please resend the change you want and I'll propose it again."
+    hooks, rec = _owner_yield_harness(monkeypatch, update_doc={
+        "project_id": "F0229",
+        "version": 2,
+        "revision_requires_clarification": True,
+        "revision_patch": {
+            "unresolved_reason": "pending confirmation expired",
+            "pending_confirmation_message": pending_message,
+        },
+    })
+
+    result = hooks._try_flyer_active_project_intercept(
+        "What catering approvals are pending?",
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-pending-confirmation"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0229"}
+    assert rec["sent"] == [pending_message]
+    assert _owner_yield_audits(rec) == []
+
+
+def test_owner_question_not_yielded_when_project_had_pending_confirmation(monkeypatch):
+    # update-flyer-project's clarification path WRITES state (it clears the
+    # pending confirmation) only when one existed, so never yield past that.
+    hooks, rec = _owner_yield_harness(monkeypatch, project_extra={
+        "pending_revision_confirmation": {"revision_id": "R001"},
+    })
+
+    result = hooks._try_flyer_active_project_intercept(
+        "What catering approvals are pending?",
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-question-over-pending"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0229"}
+    assert len(rec["sent"]) == 1
+    assert _owner_yield_audits(rec) == []
+
+
+def test_owner_flyer_revision_is_still_handled_as_revision(monkeypatch):
+    hooks, rec = _owner_yield_harness(monkeypatch)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "make the logo bigger",
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-logo-bigger"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0229"}
+    assert len(rec["update_calls"]) == 1
+    assert len(rec["sent"]) == 1
+    assert _owner_yield_audits(rec) == []
+
+
+@pytest.mark.parametrize("text", [
+    "change background to #FFAA33",
+    # An F8 verb is present, so only the standalone-token check keeps this out.
+    "use #FFAA33 for the title and approve",
+    # All-caps hashtags satisfy `_CODE_PATTERN` but carry no F8 verb.
+    "add #PARTY at the bottom",
+    "#TASTY",
+])
+def test_owner_hashtag_or_hex_revision_is_not_read_as_approval_code(monkeypatch, text):
+    hooks, rec = _owner_yield_harness(monkeypatch)
+
+    result = hooks._try_flyer_active_project_intercept(
+        text,
+        "15550100009@s.whatsapp.net",
+        {"message_id": "owner-hex-colour"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0229"}
+    assert len(rec["update_calls"]) == 1
+    assert _owner_yield_audits(rec) == []
+
+
+# Product review (2026-10-15): genuine owner revisions that carry NO flyer
+# signal the deterministic helpers recognise. Absence of flyer signals must
+# never be enough to yield; the owner must get exactly what a non-owner gets.
+_OWNER_TERSE_REVISIONS = [
+    "price should be 12.99", "12.99", "looks good but date is 25th", "25th",
+    "time 6pm not 5", "its saturday not sunday", "date galat hai, 26 karo",
+    "phone number tappu undi", "logo bada karo", "Diwali sale 20% off pettu",
+    "too dark", "menu items missing", "spelling mistake", "can you redo it",
+    "redo", "try again", "another one", "no", "not good", "dont like it",
+    "hmm not this", "start over", "cancel", "wait",
+    "remove the phone", "wrong address", "bigger font",
+]
+
+
+@pytest.mark.parametrize("text", _OWNER_TERSE_REVISIONS)
+def test_owner_terse_revision_without_flyer_signal_is_not_yielded(monkeypatch, text):
+    outcomes = []
+    for owner in (True, False):
+        hooks, rec = _owner_yield_harness(monkeypatch, owner=owner)
+        result = hooks._try_flyer_active_project_intercept(
+            text,
+            "15550100009@s.whatsapp.net",
+            {"message_id": f"owner-terse-{owner}"},
+        )
+        assert _owner_yield_audits(rec) == []
+        outcomes.append((result, rec["sent"], len(rec["update_calls"])))
+    # Owner outcome is byte-identical to the non-owner (pre-fix) outcome.
+    assert outcomes[0] == outcomes[1]
+
+
+def test_standalone_approval_code_helper_rejects_hex_colour_prefixes():
+    hooks, _actions = _load_plugin_modules()
+    assert hooks._has_standalone_approval_code("#4SX94 approve")
+    assert hooks._has_standalone_approval_code("approve #4SX94")
+    assert hooks._has_standalone_approval_code("#4SX94, approve")
+    assert not hooks._has_standalone_approval_code("change background to #FFAA33")
+    assert not hooks._has_standalone_approval_code("use #ABCDEF for the title")
+    assert not hooks._has_standalone_approval_code("change background to #FF0000")
+
+
+def test_owner_catering_question_whole_dispatch_passes_through_to_llm(monkeypatch, tmp_path):
+    """F0229 live replay through the REAL top-level hook: dual-role owner LID chat
+    (scalar role "employee", owner capability True) with an open flyer project in
+    awaiting_final_approval asks a catering question. Only identity, state lookups,
+    the update-flyer-project subprocess and the bridge are stubbed; every routing
+    arm runs real except `_try_flyer_primary_intercept`, a fail-on-call tripwire.
+    The turn must pass through to the LLM (None) with no send and no later arm
+    (delivery-state guard, primary, vague-start, starter, F7) claiming it."""
+    hooks, actions = _load_plugin_modules()
+    phone = "+15550100009"
+    chat = "15550100009@lid"
+    project = {
+        "project_id": "F0229",
+        "customer_phone": phone,
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Spice Kitchen", "contact_info": phone},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    audits: list[dict] = []
+    sent: list[tuple] = []
+    update_calls: list[tuple] = []
+    spawned: list[tuple] = []
+
+    import safe_io
+    monkeypatch.setattr(safe_io, "bridge_post", lambda *a, **k: sent.append(("bridge_post", a)) or (True, "mid", "", 200))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda cid, txt, **k: sent.append(("send_flyer_text", txt)) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw))
+    monkeypatch.setattr(actions, "audit_raw_body", lambda *a, **k: None)
+    monkeypatch.setattr(actions, "mark_cf_router_inbound_seen", lambda *a, **k: False)
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "LEADS_PATH", tmp_path / "catering-leads.json")
+    # Realistic production identity for the dual-role owner.
+    monkeypatch.setattr(actions, "identify_sender_metadata",
+                        lambda _c: {"role": "employee", "roles": ["employee", "owner"], "phone": phone})
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: (phone, "employee"))
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _c: True)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0009", "status": "active"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _p, _c: project)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda *a, **k: None)
+    monkeypatch.setattr(actions, "find_reserved_flyer_guest_order", lambda *a, **k: None)
+    monkeypatch.setattr(actions, "find_active_catering_lead_by_sender", lambda _p, _c: None)
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *a: update_calls.append(a) or (True, json.dumps({
+        "project_id": "F0229",
+        "version": 2,
+        "revision_requires_clarification": True,
+        "revision_patch": {
+            "changed": False, "visual_only": False, "ambiguous": False, "already_applied": False,
+            "unresolved_reason": "I could not match that change to the current flyer details.",
+        },
+    })))
+    monkeypatch.setattr(actions, "trigger_create_catering_lead", lambda **kw: pytest.fail("no catering lead"))
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **kw: pytest.fail("no flyer intake"))
+    monkeypatch.setattr(actions, "spawn_bare_flyer_render_and_send", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *a, **k: pytest.fail("primary arm must not run"))
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="What catering approvals are pending?",
+        chat_id=chat,
+        message_id="wamid.OWNER_CATERING_Q",
+    ))
+
+    assert result is None
+    assert sent == []
+    assert spawned == []
+    assert len(update_calls) == 1
+    reasons = [a.get("reason") for a in audits]
+    assert "error" not in reasons, audits
+    yielded = [a for a in audits if "owner_yielded=true" in str(a.get("detail") or "")]
+    assert len(yielded) == 1, audits
+    assert "yield_reason=non_revision_clarification" in yielded[0]["detail"]
+    assert "owner_capability=true" in yielded[0]["detail"]
+    assert "sender_role=employee" in yielded[0]["detail"]
+
+
 def test_preview_layout_change_with_create_new_wording_stays_on_active_project(monkeypatch):
     hooks, actions = _load_plugin_modules()
     active_project = {
