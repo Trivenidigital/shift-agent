@@ -508,6 +508,28 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # existing layout untouched → byte-identical.
     message_first = cd_poster_archetype == "message_first"
 
+    # Saved active logos belong to the resolved customer; uploaded logos also
+    # need the existing explicit ownership claim. Never treat a style template
+    # or reference as identity, and never ask the image model to redraw a logo.
+    logo_asset = render._selected_owned_logo(project)
+    owned_logo = None
+    if logo_asset is not None:
+        import hashlib
+        import io
+        asset = logo_asset
+        try:
+            logo_bytes = Path(asset.path).read_bytes()
+            if hashlib.sha256(logo_bytes).hexdigest() != str(asset.sha256).lower():
+                raise render.FlyerRenderError("owned logo content hash mismatch")
+            with Image.open(io.BytesIO(logo_bytes)) as logo:
+                owned_logo = logo.convert("RGBA")
+        except render.FlyerRenderError:
+            raise
+        except Exception as exc:
+            raise render.FlyerRenderError("owned logo unreadable") from exc
+        if message_first:
+            raise render.FlyerRenderError("owned logo placement unsupported for message_first overlay")
+
     # ===================================================================
     # PHASE-1 CONTRACT (Codex FINAL review, FINDING 1 BLOCKER): ONLY the
     # message_first (A) template is built in Phase 1. EVERY other archetype —
@@ -679,17 +701,26 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         ring_top  = int(height * 0.0415)           # ≈56px @1350
         ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
 
-        draw.ellipse(
-            (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
-            outline=_EMBLEM_GOLD,
-            width=3,
-        )
+        if owned_logo is not None:
+            logo = owned_logo.copy()
+            # Preserve aspect ratio and transparency, never crop or synthesize
+            # logo pixels. Small originals retain their native resolution.
+            logo.thumbnail((ring_half * 4, ring_half * 2), Image.Resampling.LANCZOS)
+            logo_x = cx_top - logo.width // 2
+            logo_y = ring_top + (ring_bot - ring_top - logo.height) // 2
+            img.paste(logo, (logo_x, logo_y), logo)
+        else:
+            draw.ellipse(
+                (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
+                outline=_EMBLEM_GOLD,
+                width=3,
+            )
 
         # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
         mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
         mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
         monogram  = _brand_monogram(business) if business else ""
-        if monogram:
+        if monogram and owned_logo is None:
             mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
             _draw_centered(draw, monogram, mono_font,
                            cy=mono_cy, width=width,
@@ -1678,13 +1709,13 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # _compose has no hook; adapt the 2-arg dispatch to its 1-arg signature.
         if not cd_narrative:
             _compose(include_narrative=False)
-            return
+            return logo_asset.sha256.lower() if owned_logo is not None else ""
         try:
             _compose(include_narrative=True)
         except render.FlyerRenderError:
             _LAST_NARRATIVE_DROP.append(True)
             _compose(include_narrative=False)
-        return
+        return logo_asset.sha256.lower() if owned_logo is not None else ""
 
     # message_first: hook-first drop ladder.
     if not cd_narrative and not cd_hook_text:

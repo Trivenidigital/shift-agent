@@ -807,3 +807,163 @@ def test_premium_masthead_keeps_word_spacing_and_readable_size(tmp_path, monkeyp
     monkeypatch.setattr(po, "_draw_centered", record)
     po.render_premium_overlay(project, _bg(tmp_path), tmp_path / "brand.png", size=(1080, 1350), output_format="concept_preview")
     assert any(text == "LAKSHMI'S KITCHEN" and size >= 40 for text, size in calls), calls
+
+def test_owned_logo_replaces_initials_with_original_pixels(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    asset = SimpleNamespace(kind="logo", path=str(logo), notes="our logo", sha256=hashlib.sha256(logo.read_bytes()).hexdigest())
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    output = tmp_path / "owned.png"
+    po.render_premium_overlay(_project6(), _bg(tmp_path), output, size=(1080, 1350), output_format="concept_preview")
+    with Image.open(output) as image:
+        assert image.getpixel((540, 90)) == (13, 211, 79)
+        assert image.crop((520, 75, 560, 105)).tobytes() == Image.open(logo).tobytes()
+
+
+def test_owned_logo_hash_mismatch_fails_closed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    logo = tmp_path / "wrong.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [SimpleNamespace(kind="logo", path=str(logo), notes="our logo", sha256="0" * 64)])
+    with pytest.raises(render.FlyerRenderError, match="logo.*hash"):
+        po.render_premium_overlay(_project6(), _bg(tmp_path), tmp_path / "fail.png", size=(1080, 1350), output_format="concept_preview")
+
+
+def test_template_and_style_reference_never_become_logo(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    baseline = tmp_path / "baseline.png"
+    project = _project6()
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [])
+    po.render_premium_overlay(project, _bg(tmp_path), baseline, size=(1080, 1350), output_format="concept_preview")
+    candidates = [SimpleNamespace(kind="template", path="unused", notes="our logo"), SimpleNamespace(kind="logo", path="unused", notes="style reference sample")]
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: candidates)
+    output = tmp_path / "references.png"
+    po.render_premium_overlay(project, _bg(tmp_path), output, size=(1080, 1350), output_format="concept_preview")
+    assert output.read_bytes() == baseline.read_bytes()
+
+def test_owned_logo_message_first_refuses_unsupported_placement(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    logo = tmp_path / "logo.png"
+    Image.new("RGBA", (40, 30), (13, 211, 79, 255)).save(logo)
+    asset = SimpleNamespace(kind="logo", path=str(logo), notes="our logo", sha256=hashlib.sha256(logo.read_bytes()).hexdigest())
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    project = _project6().model_copy(update={"creative_direction": {"poster_archetype": "message_first"}})
+    with pytest.raises(render.FlyerRenderError, match="owned logo placement unsupported"):
+        po.render_premium_overlay(project, _bg(tmp_path), tmp_path / "unsupported.png", size=(1080, 1350), output_format="concept_preview")
+
+
+def test_uploaded_logo_requires_explicit_ownership(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    logo = tmp_path / "upload.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    asset = SimpleNamespace(kind="logo", path=str(logo), notes="", sha256=hashlib.sha256(logo.read_bytes()).hexdigest())
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [])
+    monkeypatch.setattr(render, "_project_reference_assets", lambda p, **kwargs: [asset])
+    project = _project6()
+    rejected = tmp_path / "unclaimed.png"
+    po.render_premium_overlay(project, _bg(tmp_path), rejected, size=(1080, 1350), output_format="concept_preview")
+    with Image.open(rejected) as image:
+        assert image.getpixel((540, 90)) != (13, 211, 79)
+    project.raw_request += ". Use my logo."
+    accepted = tmp_path / "claimed.png"
+    po.render_premium_overlay(project, _bg(tmp_path), accepted, size=(1080, 1350), output_format="concept_preview")
+    with Image.open(accepted) as image:
+        assert image.getpixel((540, 90)) == (13, 211, 79)
+
+@pytest.mark.parametrize("status", ["premium_overlay_degraded_to_flat", "premium_overlay_failed_unexpected"])
+def test_owned_logo_never_falls_back_to_flat(tmp_path, monkeypatch, status):
+    from types import SimpleNamespace
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [SimpleNamespace(kind="logo", notes="our logo", path="owned.png")])
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda p: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda p: True)
+    monkeypatch.setattr(render, "_render_premium_overlay_with_fallback", lambda *a, **k: render.PremiumOverlayOutcome(status, "fit", "cannot fit", "none", "concept_preview"))
+    flat_calls = []
+    monkeypatch.setattr(render, "apply_critical_text_overlay", lambda *a, **k: flat_calls.append(True))
+    with pytest.raises(render.FlyerRenderError, match="quality check.*owned logo"):
+        render._apply_critical_text_overlay(_project6(), "source.png", "target.png", size=(1080, 1350), output_format="concept_preview")
+    assert flat_calls == []
+
+
+def test_owned_logo_unsupported_layout_propagates_through_public_overlay(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    asset = SimpleNamespace(kind="logo", path=str(logo), notes="our logo", sha256=hashlib.sha256(logo.read_bytes()).hexdigest())
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda p: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda p: True)
+    project = _project6().model_copy(update={"creative_direction": {"poster_archetype": "message_first"}})
+    output = tmp_path / "must-not-exist.png"
+    with pytest.raises(render.FlyerRenderError, match="quality check.*owned logo"):
+        render._apply_critical_text_overlay(project, _bg(tmp_path), output, size=(1080, 1350), output_format="concept_preview")
+    assert not output.exists()
+
+def test_owned_logo_vetoes_ppv1_and_integrated_composers(monkeypatch):
+    monkeypatch.setattr(render, "_selected_owned_logo", lambda p: object())
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda p: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda p: True)
+    monkeypatch.setattr(render, "_premium_poster_v1_required_facts_present", lambda p: True)
+    monkeypatch.setattr(render, "_premium_poster_v1_composer_unfit", lambda p: False)
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "0")
+    assert not render._premium_poster_v1_eligible(_project6())
+    assert not render._integrated_poster_eligible(_project6())
+
+
+def test_direct_ppv1_skips_owned_logo_before_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(render, "_selected_owned_logo", lambda p: object())
+    outcome = render.render_premium_poster_v1(_project6(), tmp_path / "unused.png", concept_id="C1", output_format="concept_preview", size=(1080, 1350), model="unused", quality="low", compose=lambda *a, **k: pytest.fail("logo must not reach PPv1"))
+    assert not outcome.delivered
+    assert outcome.reason == "owned_logo_requires_overlay"
+
+
+def test_deterministic_owned_logo_cannot_silently_drop_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(render, "_render", lambda *a, **k: None)
+    monkeypatch.setattr(render, "_selected_owned_logo", lambda p: object())
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda p: True)
+    with pytest.raises(render.FlyerRenderError, match="quality check.*owned logo"):
+        render._render_model(_project6(), tmp_path / "unused.png", concept_id="C1", output_format="concept_preview", size=(1080, 1350), model="deterministic-renderer", quality="low")
+
+def test_logo_manifest_binds_actual_painter_not_later_profile(tmp_path, monkeypatch):
+    import hashlib, json
+    from types import SimpleNamespace
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    asset = SimpleNamespace(kind="logo", path=str(logo), notes="our logo", sha256=hashlib.sha256(logo.read_bytes()).hexdigest())
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda p: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda p: True)
+    project = _project6()
+    target = tmp_path / "preview.png"
+    render._apply_critical_text_overlay(project, _bg(tmp_path), target, size=(1080, 1350), output_format="concept_preview")
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [])
+    manifest = render.write_text_manifest(project, target, output_format="concept_preview")
+    assert json.loads(manifest.read_text())["owned_logo_sha256"] == asset.sha256
+
+
+def test_missing_owned_logo_fails_instead_of_becoming_monogram(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    def active(project, *, include_missing=False):
+        assert include_missing
+        return [SimpleNamespace(kind="logo", path=str(tmp_path / "missing.png"), notes="our logo", sha256="a" * 64)]
+    monkeypatch.setattr(render, "_active_brand_assets", active)
+    with pytest.raises(render.FlyerRenderError, match="owned logo unreadable"):
+        po.render_premium_overlay(_project6(), _bg(tmp_path), tmp_path / "absent.png", size=(1080, 1350), output_format="concept_preview")
+
+def test_owned_logo_sha_survives_subprocess_result(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda p: str(p) == "/usr/bin/python3" or original_exists(p))
+    def missing_pil(*args, **kwargs):
+        raise ImportError("no PIL in gateway")
+    monkeypatch.setattr(po, "render_premium_overlay", missing_pil)
+    monkeypatch.setattr(render.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout='{"owned_logo_sha256": "' + "a" * 64 + '"}', stderr=""))
+    outcome = render._render_premium_overlay_with_fallback(_project6(), "source.png", "target.png", size=(1080, 1350), output_format="concept_preview")
+    assert outcome.status == "premium_overlay_delivered"
+    assert outcome.render_path == "subprocess"
+    assert outcome.owned_logo_sha256 == "a" * 64

@@ -46,6 +46,7 @@ def test_background_retains_reference_photo_but_not_brand_templates(tmp_path, mo
     monkeypatch.setattr(render, "_generation_brand_assets", lambda _: [
         SimpleNamespace(path=str(logo), mime_type="image/png", kind="logo")])
     monkeypatch.setattr(render, "_project_reference_assets", lambda _: [
+        SimpleNamespace(path=str(logo), mime_type="image/png", kind="logo"),
         SimpleNamespace(path=str(photo), mime_type="image/png", kind="reference_image")])
     content = render._image_message_content(project(), concept_id="C1",
         output_format="concept_preview", size=(1080, 1350))

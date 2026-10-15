@@ -5766,3 +5766,29 @@ def test_rung_success_persists_deterministic_recovery_flag(monkeypatch, tmp_path
     )
     # QA-fail path leaves flag absent/False — verified by test_rung_qa_fail_falls_through_to_manual
     # Flag-off path leaves flag absent/False — verified by test_rung_flag_off_is_byte_identical_manual
+
+def test_owned_logo_quality_failure_queues_manual_without_deterministic_fallback(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["reference_extractions"][0].update(provider="openai", status="ok", detail="extracted")
+    project["status"] = "generating_concepts"
+    state_path.write_text(json.dumps({"schema_version": 1, "next_sequence": 2, "projects": [project]}), encoding="utf-8")
+    calls = []
+    def fail_identity(*args, **kwargs):
+        calls.append(kwargs.get("model"))
+        raise module.FlyerRenderError("quality check failed: owned logo could not be preserved: unsupported placement")
+    monkeypatch.setattr(module, "render_concept_previews", fail_identity)
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0001", "--state-path", str(state_path), "--asset-dir", str(asset_dir), "--config-path", str(tmp_path / "config.yaml")])
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "visual_qa_failed"
+    assert len(calls) == 1
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"

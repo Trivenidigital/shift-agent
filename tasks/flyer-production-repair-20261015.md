@@ -70,9 +70,9 @@ User accepted the preceding focused repair approach and asked implementation to 
 
 ## Checklist
 - [x] Capture actual F0229 project/QA/hashes, image and effective runtime flags; verify source receipt.
-- [ ] Parallel root-cause reviews: intake/revisions; visual/QA; scope/reuse/approval.
-- [ ] Add failing regressions for reproduced faults; implement bounded existing-path repairs.
-- [ ] Verify representative briefs/revisions and inspect generated previews/four formats.
+- [x] Parallel root-cause reviews: intake/revisions; visual/QA; scope/reuse/approval.
+- [x] Add failing regressions for reproduced faults; implement bounded existing-path repairs.
+- [x] Verify representative briefs/revisions and inspect generated previews/four formats.
 - [ ] Independent scope/safety review; relevant Linux suite and governance/CI pass.
 - [ ] Canonical release and postdeploy service-account verification with rollback retained.
 - [ ] Report actual production evidence and any remaining human-only gates.
@@ -128,3 +128,10 @@ Repair changes only tests/test_amend_catering_lead.py. The per-invocation clock 
 
 After repair: pytest tests/test_amend_catering_lead.py -q → 55 passed in 3.97 seconds, Docker network disabled.
 
+
+## Final verification and logo preservation
+- Clean Git-bundle run of the main repair snapshot: 10,448 passed, 47 skipped; only the two baseline date-fixture failures remained. Both are corrected in the subsequent test-only commit (55 module tests passed).
+- All eight CI checks passed on commit 6ba08787. Later owned-logo safeguards require refreshed CI and release build checks before deployment.
+- Rehearsal8 reused the real-model background from replay7 to isolate composition changes; fresh external OCR passed preview and all four exports again. No customer approval was fabricated, and no product message was sent.
+- Owned logos are now selected through existing customer/active/ownership rules and composited from verified bytes; templates remain style inputs. Unsupported paths and failures must enter manual review rather than silently drop identity. Actual painted-logo provenance is carried through the existing outcome/manifest and checked before final export.
+- F0229's account has no active owned logo; the active asset is a style template. Therefore its initials emblem is appropriate, and no inactive receipt/reference/logo is promoted to identity.
