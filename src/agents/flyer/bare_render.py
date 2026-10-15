@@ -825,7 +825,8 @@ def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_
                 entry = schemas.FlyerExtractionV2Outcome(
                     ts=datetime.now(timezone.utc), seam="bare_render", event=event,
                     items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
-                    dropped_by_parity_n=len(payload.dropped_by_parity))
+                    dropped_by_parity_n=len(payload.dropped_by_parity),
+                    reason=payload.audit_reason() if hasattr(payload, "audit_reason") else "")
             elif event == "semantic_brief_outcome":
                 entry = schemas.FlyerSemanticBriefOutcome(
                     ts=datetime.now(timezone.utc), seam="bare_render",

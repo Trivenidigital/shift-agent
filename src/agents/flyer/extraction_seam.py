@@ -63,14 +63,21 @@ def extract_text_facts_seam(fields, raw_request, *, message_id="", report_out=No
     if extraction_v2_enabled():
         try:
             try:  # flat then package
-                from flyer_extraction_v2 import extract_text_facts_v2  # type: ignore
+                from flyer_extraction_v2 import extract_text_facts_v2, apply_accepted_spelling  # type: ignore
             except ImportError:  # pragma: no cover
-                from agents.flyer.extraction_v2 import extract_text_facts_v2
+                from agents.flyer.extraction_v2 import extract_text_facts_v2, apply_accepted_spelling
             facts, report = extract_text_facts_v2(
                 fields, raw_request, message_id=message_id,
                 profile_business_name=profile_business_name)
             if not allow_text_identity:
                 facts = [f for f in facts if f.fact_id not in _IDENTITY_FACT_IDS]
+            corrections = getattr(report, "spelling_corrections", [])
+            if corrections:
+                # Display context follows the accepted canonical copy; retain
+                # raw_request unchanged as the original customer evidence.
+                notes = apply_accepted_spelling(fields.notes or raw_request, corrections)
+                validated = type(fields).model_validate({**fields.model_dump(), "notes": notes})
+                fields.notes = validated.notes
             if report_out is not None:
                 try:
                     report_out["occasion"] = getattr(report, "occasion", "none")

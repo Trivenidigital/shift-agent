@@ -177,8 +177,50 @@ In-tree matches cover the requested work; ecosystem substitution is unnecessary.
 - Vertical E2E proof: newly generated real-model background, actual preview/four exports inspected, deployed path verified; human performs genuine final approval/delivery test.
 
 Repo-meta reuse map above also covers this evidence record. Existing approval to fix visual polish and standing reviewed release authorization apply.
-- [ ] Repair prompt and sparse typography; targeted regression checks.
-- [ ] Generate fresh real-model image and inspect actual exports; independent visual review.
-- [ ] CI/release/deployment parity and exact human WhatsApp messages.
+- [x] Repair prompt and sparse typography; targeted regression checks.
+- [x] Generate fresh real-model image and inspect actual exports; independent visual review.
+- [x] CI/release/deployment parity and exact human WhatsApp messages.
 
 Visual polish evidence: raw image confirmed model-painted seams; revised continuous-photo prompt generated a seamless fresh image. Sparse compositor now separates footer fields, strengthens price hierarchy, retains offer:0 test disclaimer in smaller cream type, and darkens the upper text region smoothly. Final focused overlay/export checks: 134 passed, 1 skipped. Prompt/render batch: 197 passed, plus reproduced/fixed category safeguard regression. No customer messages or production-state writes during model rehearsals.
+
+### Visual polish release result — October 15 17:38 UTC
+PR #803 merged/deployed: 81e3e70433949051d74cd8f9d7d6f7b46f18fb7a. Full canonical gate on a26da9b2: 10,475 passed, 47 skipped in 803.38 seconds; all eight CI checks passed. Merged deployable tree identical to tested candidate. Artifact SHA256 30d6bbf359500a3dee7665e5ed9875b05d28d3d018bdf4cb152d13b2e8b62c15 verified on host before extraction. Deploy deploy-20261015-173532-81e3e704 completed; rollback deploy-20261015-162126-35cd85ef retained. Receipt installed 17:35:33Z.
+Both service-account Python environments verified exact changed-file hashes and flat module origins. All smoke checks passed; gateway active, NRestarts=0, bridge connected, queueLength=0. Installed-code isolated preview and four export formats passed fresh OCR. Deployed preview SHA256 17a4d6c6e2035264b8ede14a6a1b6e7b15c7fcbe7775706bffae80da48ddc7ad exactly matches the independently reviewed composite. Fresh image generation occurred in polish1; later composition/deployed parity checks reused that real background, without fabricating handset evidence. No customer messages or production project/approval/quota writes made by rehearsals.
+Visual review GO: seamless photograph, complete semantic footer, prominent price, subordinate readable disclaimer, no clipping. Dense/menu and message-first layouts retain their existing treatment. Non-food category safeguard regression reproduced and fixed before release. Private evidence retained in sibling polish*.log and flyer-polished-deployed.png; no customer images published to GitHub.
+Remaining human E2E: owner sends standalone NEW TEST ONLY brief, reviews the new preview, chooses a concept only if prompted, then swipe-replies to that new preview with exactly APPROVE. Existing router binds the quote to the new project and performs finalize/send. No approval code or project suffix is required. Do not approve old F0229.
+### F0231 genuine handset failure — October 15 23:01 UTC
+Read-only incident investigation after user screenshot. Deployed SHA remains81e3e704. Intake correctly captured all six requested snack names and shared$4.99 price. Premium-poster managed render attempted/selected then final QA failed; deterministic recovery also failed and project entered manual_edit_required. Usage reservation released (3→2); no approval or delivery occurred.
+Quarantined candidate /opt/shift-agent/state/flyer/quarantine/F0231/20261015T230201.214139Z-deterministic_recovery/F0231-C1-preview.png SHA25695b53d4a7415ac99835fb5c74dfdeb1bc82717b2da721f9d99f32c9bf959c99e matches its QA sidecar. Actual image visibly contains Mysoore Pak, exactly as requested; OCR extracted Mysore Pak and _near_duplicate_item_blockers rejected it. This is a confirmed OCR false positive on that candidate. Final recovery failure refers to a different artifact hash0512d7d6…; trace/inspect that distinct artifact before asserting identical pixels or cause.
+Multi-item layout remains visibly weak (oversized title/price seal, heavy menu panel and hard upper background transition). Prior sparse buffet visual validation did not establish multi-item quality. Existing VISION_QA_PROMPT requests spelling-defect notes but does not explicitly forbid spelling normalization. Investigate a minimal verbatim-transcription/targeted verification repair through existing vision capability; do not loosen all item matching, add dish alias tables, or whitelist this misspelling.
+Failure copy promises an update; manual-review row is queued, but independent execution/completion of that review remains unproven. Preserve F0231 history. Private evidence in sibling snacks-live-probe.log, F0231-quarantined.png and F0231-qa.json. No code/config/runtime state changes or customer sends performed by this investigation.
+
+## Automatic spelling correction — explicit user requirement
+**Drift-check tag:** extends-Hermes
+**New primitives introduced:** none.
+### Hermes-first analysis
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| Copy interpretation | Existing Hermes/OpenRouter V2 extraction call | Model proposes clear spelling corrections within same response |
+| Fact authority | Existing extraction source-parity and locked facts | Ground original spans, validate bounded spelling changes, then lock canonical spelling |
+| Audit and QA | Existing extraction outcome event and visual QA | Record before/after in existing reason; QA checks canonical locked copy without fuzzy waiver |
+In-tree capabilities cover this requirement. No new service, dictionary, router, store or schema migration.
+### Capability Reuse Map — flyer-studio
+- Requested outcome: auto-correct clear item/title typos such as Mysoore Pak→Mysore Pak before fact locking.
+- Affected projects: flyer-studio.
+- Applicable directives: universal, registry and flyer-studio versions/hashes above.
+- Existing platform/model capabilities reused: same structured extraction model call; no separate spelling service.
+- Existing deterministic kernels reused: source parity, bounded validation, locked-fact/render/QA authority.
+- Existing stores/workflows reused: raw_request, FlyerLockedFact, existing extraction audit outcome, generation/approval/export.
+- Thin adapters: optional model correction output and guarded original-to-canonical mapping in current extractor.
+- Custom runtime code genuinely unavoidable: validation and existing audit wiring only.
+- New subsystem: none. Architecture exception: none.
+- Evidence existing capabilities were insufficient: current VERBATIM source guard rejects correct spellings absent from input; F0231 retained Mysoore while OCR read Mysore.
+- Shared-platform impact: none; no schema or router changes.
+- Other agents affected: none. Protected identity, price, phone, address, schedule, offer restrictions remain authoritative.
+- Vertical E2E proof: exact F0231 original brief extracts canonical Mysore Pak; actual render and OCR agree; original raw text preserved; invalid/ambiguous changes retain original.
+Repo-meta capability map above covers plan/evidence changes.
+- [ ] Regression tests and same-call model correction integration.
+- [ ] Real-model exact brief replay, audit and visual proof.
+- [ ] Independent review, CI, canonical release, installed-code verification.
+
+Spelling verification:110focused extraction/seam/intake tests passed;200semantic/QA tests passed; independent121test review GO. Exact F0231 real-model response independently returned original Mysoore Pak + corrected Mysore Pak and clear_spelling_error; raw preserved, canonical notes/facts rendered. First replay exposed brand heuristic misclassifying declared Any Item/Mysore Pak with savedtemplate; reproduced/fixed via exact declared-copy exception, retaining explicit brand/source/orgsuffix checks. Secondpreview passed realOCR and visually confirmed canonicalspelling. Final exports/releasegate pending.

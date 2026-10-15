@@ -36,6 +36,34 @@ def test_flag_off_is_byte_identical_legacy_and_silent():
     assert audits == []  # zero rows when the flag is off
 
 
+@pytest.mark.parametrize("model_name", ["Mysoore Pak", "mysoore pak"])
+def test_accepted_spelling_updates_display_context_and_mirrors_not_raw(monkeypatch, model_name):
+    from agents.flyer.render import _poster_copy_plan
+    from schemas import FlyerProject
+    from datetime import datetime, timezone
+    raw = "Mysoore Pak $4.99. Offer: Mysoore Pak is not available weekends."
+    fields = FlyerRequestFields(notes=raw)
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.setattr(extraction_v2, "_default_transport", lambda *_: json.dumps({
+        "campaign_title": "Mysoore Pak", "pricing_structure": "Mysoore Pak $4.99",
+        "offers": ["Mysoore Pak is not available weekends"],
+        "items": [{"name": model_name, "corrected_name": "Mysore Pak",
+            "spelling_judgment": "clear_spelling_error", "price": "$4.99"}]}))
+    audits = []
+    facts = extract_text_facts_seam(fields, raw, audit=lambda event, report: audits.append(report))
+    project = FlyerProject(project_id="F1234", status="intake_started", customer_phone="+15550100001",
+        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        original_message_id="spelling", raw_request=raw, fields=fields, locked_facts=facts)
+    assert project.raw_request == raw
+    assert fields.notes == "Mysore Pak $4.99. Offer: Mysore Pak is not available weekends."
+    values = {f.fact_id: f.value for f in facts}
+    assert values["campaign_title"] == "Mysore Pak"
+    assert values["pricing_structure"] == "Mysore Pak $4.99"
+    assert values["offer:0"] == "Mysore Pak is not available weekends"
+    assert "Mysoore" not in str(_poster_copy_plan(project))
+    assert any(c["fact_id"] == "pricing_structure" for c in audits[0].spelling_corrections)
+
+
 def test_flag_on_routes_through_v2_and_audits(monkeypatch):
     monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
     fake_facts = [extraction_v2._fact("item:0:name", "idli")]

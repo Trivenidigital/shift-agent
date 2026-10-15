@@ -2148,3 +2148,5 @@ Plan + evidence: [catering-flyer-readiness-20261008.md](catering-flyer-readiness
 User authorized focused repair after F0229 visual failure. Plan: tasks/flyer-production-repair-20261015.md. Source+runtime a421a765, isolated branch codex/flyer-production-repair-20261015. Gates: reproduce, repair existingpaths, visually validate realmodel output, review, CI, canonicaldeploy, true customerjourney proof.
 
 - [x] Flyer repair #802 deployed as 35cd85ef; 10,468 full-gate tests passed; all CI and production smoke checks passed; installed-code isolated preview/four-export OCR passed. See flyer-production-repair-20261015.md. Real handset approval/delivery and broader visual acceptance remain rollout gates.
+
+- [x] Visual polish #803 deployed81e3e704: continuous photo, separated footer, price/disclaimer hierarchy/contrast; 10,475tests passed, all CI/smoke checks passed, installed preview/four-export OCR passed. Human WhatsApp approval/delivery remains to be performed with new preview.
