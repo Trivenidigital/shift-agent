@@ -267,3 +267,7 @@
 - 2026-10-15 A generated/sent preview with zero QA warnings is not a passed product test. Inspect the actual artifact against the original request. Never approve a known-defective flyer merely to clear a workflow; preserve it as regression evidence and use supported cancel/new-project paths. Trace structured brief, prompt, revision and QA before attributing failure to the image model.
 
 - 2026-10-15 Visual acceptance is separate from OCR correctness. Visible photographic seams and weak offer hierarchy remain release work when the user requests professional output; inspect raw art to distinguish model composition defects from deterministic overlay defects.
+
+- 2026-10-15 Flyer readiness must cover multi-item shared-price paths separately from sparse buffet offers. Compare OCR output to the actual hash-matched image before attributing spelling mismatch to the renderer; vision may normalize an unfamiliar dish name despite correct pixels.
+
+- 2026-10-15 Customer-requested spelling normalization belongs before locked facts are created. Preserve original raw input, let the existing model propose clear copy corrections, and render/QA the accepted canonical spelling. Do not force customers to retain typos or treat all canonicalization as an OCR failure.

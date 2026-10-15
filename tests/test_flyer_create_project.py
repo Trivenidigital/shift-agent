@@ -198,6 +198,32 @@ def test_managed_intake_projects_grounded_title_not_request_fragment(tmp_path, m
                for f in project["locked_facts"])
 
 
+def test_managed_spelling_keeps_raw_and_audits_before_after(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch, with_audit=True)
+    from agents.flyer import extraction_v2
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.setattr(module, "LOG_PATH", tmp_path / "decisions.log")
+    monkeypatch.setattr(extraction_v2, "_default_transport", lambda *_: json.dumps({
+        "business_name": "Sweet Shop", "contact_phone": "+15550100001",
+        "items": [{"name": "Mysoore Pak", "corrected_name": "Mysore Pak",
+                   "spelling_judgment": "clear_spelling_error", "price": "$4.99"}]}))
+    raw = "Sweet Shop. Mysoore Pak $4.99. Phone +15550100001."
+    monkeypatch.setattr(sys, "argv", ["create-flyer-project", "--customer-phone", "+15550100001",
+        "--message-id", "spelling-managed", "--raw-request", raw,
+        "--state-path", str(tmp_path / "projects.json"),
+        "--customer-state-path", str(tmp_path / "customers.json")])
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["raw_request"] == raw
+    assert next(f["value"] for f in project["locked_facts"] if f["fact_id"] == "item:0:name") == "Mysore Pak"
+    rows = [json.loads(line) for line in module.LOG_PATH.read_text().splitlines()]
+    outcome = next(row for row in rows if row["type"] == "flyer_extraction_v2_outcome")
+    assert "Mysoore Pak->Mysore Pak" in outcome["reason"]
+    from schemas import FlyerProject
+    from agents.flyer.render import _poster_copy_plan
+    assert "Mysoore" not in str(_poster_copy_plan(FlyerProject.model_validate(project)))
+
+
 def test_flyer_project_store_accepts_legacy_rows_without_origin_fields():
     from schemas import FlyerProjectStore  # noqa: E402
 

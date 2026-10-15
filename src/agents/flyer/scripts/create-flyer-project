@@ -751,7 +751,8 @@ def main() -> int:
                     entry = FlyerExtractionV2Outcome(
                         ts=datetime.now(timezone.utc), seam="managed_create", event=event,
                         items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
-                        dropped_by_parity_n=len(payload.dropped_by_parity))
+                        dropped_by_parity_n=len(payload.dropped_by_parity),
+                        reason=payload.audit_reason() if hasattr(payload, "audit_reason") else "")
                 else:
                     entry = FlyerExtractionV2Outcome(
                         ts=datetime.now(timezone.utc), seam="managed_create", event=event,

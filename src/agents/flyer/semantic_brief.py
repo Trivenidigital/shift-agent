@@ -656,7 +656,10 @@ def _project_ingested_external_reference(project: FlyerProject) -> bool:
         if getattr(asset, "kind", "") == "reference_image":
             return True
     try:
-        from agents.flyer.render import _active_brand_assets
+        try:
+            from flyer_render import _active_brand_assets
+        except ImportError:
+            from agents.flyer.render import _active_brand_assets
 
         for asset in _active_brand_assets(project):
             if getattr(asset, "kind", "") == "template":
@@ -683,6 +686,22 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
     allowed.discard("")
     blockers: list[str] = []
     external_ref = _project_ingested_external_reference(project)
+    declared_copy = {_norm(fact.value) for fact in project.locked_facts
+                     if re.fullmatch(r"item:\d+:name", fact.fact_id)}
+    # Reuse the compositor's shared-offer label rather than infer another
+    # business from its explicitly declared copy (e.g. "Any Item" above $4.99).
+    try:
+        try:
+            from flyer_render import _shared_price_offer_parts
+        except ImportError:
+            from agents.flyer.render import _shared_price_offer_parts
+        pricing = [fact.value.rstrip(" .;:") for fact in project.locked_facts
+                   if fact.fact_id == "pricing_structure" or fact.fact_id.startswith("offer:")]
+        _text, label, _price = _shared_price_offer_parts(pricing)
+        if label:
+            declared_copy.add(_norm(label))
+    except ImportError:
+        pass  # Existing fail-closed classification if the renderer is unavailable.
 
     def allowed_identity_visible(value: str) -> bool:
         return any(_norm_contains(value, allowed_name) for allowed_name in allowed)
@@ -775,6 +794,10 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
             2 <= len(words) <= 3 and (candidate.istitle() or uppercase_ratio >= 0.8)
         )
         if not has_org_suffix and not name_shaped:
+            continue
+        # This exemption is only for the suffix-less heuristic. Explicit
+        # identity claims and source-contract brands were checked above.
+        if not has_org_suffix and _norm(candidate) in declared_copy:
             continue
         if is_campaign_title(candidate):
             continue

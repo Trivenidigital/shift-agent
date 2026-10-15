@@ -8,6 +8,28 @@ from agents.flyer.semantic_brief import (
 from schemas import FlyerRequestFields
 
 
+def test_template_brand_guard_accepts_declared_canonical_menu_copy(monkeypatch):
+    from datetime import datetime, timezone
+    from agents.flyer import semantic_brief as sb
+    from schemas import FlyerProject, FlyerLockedFact
+    now = datetime.now(timezone.utc)
+    project = FlyerProject(project_id="F9997", status="generating_concepts",
+        customer_phone="+12025550142", created_at=now, updated_at=now,
+        original_message_id="synthetic", raw_request="Mysoore Pak, any item $4.99",
+        fields=FlyerRequestFields(), locked_facts=[
+            FlyerLockedFact(fact_id=k, label=k, value=v, source="customer_text", required=True)
+            for k, v in [("business_name", "Sample Kitchen"), ("campaign_title", "Evening Snacks"),
+                         ("item:0:name", "Mysore Pak"), ("pricing_structure", "Any item $4.99.")]])
+    monkeypatch.setattr(sb, "_project_ingested_external_reference", lambda _: True)
+    text = "SAMPLE KITCHEN\nEVENING SNACKS\nANY ITEM\n$4.99\n- Mysore Pak"
+    assert sb.visible_wrong_brand_blockers(project, text) == []
+    assert sb.visible_wrong_brand_blockers(project, text + "\nSaravana Bhavan") == [
+        "visible wrong business/brand: Saravana Bhavan"]
+    # Explicit identity assertions remain stronger than a declared item name.
+    assert "visible wrong business/brand: Mysore Pak" in sb.visible_wrong_brand_blockers(
+        project, text + "\nBrand: Mysore Pak")
+
+
 def test_semantic_brief_parses_f0106_campaign_pricing_and_offer():
     raw = (
         "Create a flyer for Diwali sale, All items 5-10% off. "

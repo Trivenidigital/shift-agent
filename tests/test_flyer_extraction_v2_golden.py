@@ -60,6 +60,109 @@ def test_secondary_copy_container_must_be_an_array():
             transport=lambda *_: json.dumps({"offers": "TEST ONLY"}))
 
 
+def test_model_spelling_correction_locks_canonical_names_and_reports_original():
+    raw = "Mysoore Pak $4.99. Idly $3.99."
+    response = {"campaign_title": "Mysoore Pak", "corrected_campaign_title": "Mysore Pak",
+        "campaign_spelling_judgment": "clear_spelling_error",
+        "items": [{"name": "Mysoore Pak", "corrected_name": "Mysore Pak",
+                   "spelling_judgment": "clear_spelling_error", "price": "$4.99"},
+                  {"name": "Idly", "price": "$3.99"}]}
+    def extract():
+        return extract_text_facts_v2(FlyerRequestFields(), raw, message_id="spelling-source",
+            transport=lambda *_: json.dumps(response))
+    facts, report = extract()
+    by_id = {f.fact_id: f for f in facts}
+    assert by_id["campaign_title"].value == "Mysore Pak"
+    assert by_id["item:0:name"].value == "Mysore Pak"
+    assert by_id["item:0:price"].value == "$4.99"
+    assert by_id["item:1:name"].value == "Idly"
+    assert by_id["item:0:name"].source_message_id == "spelling-source"
+    assert report.spelling_corrections
+    assert "Mysoore Pak->Mysore Pak" in report.audit_reason()
+    assert len(report.audit_reason()) <= 120
+    assert extract()[0] == facts
+
+
+@pytest.mark.parametrize("original,corrected,judgment,raw", [
+    ("Mysore Pak", "Mysore Bonda", "clear_spelling_error", "Mysore Pak $4.99"),
+    ("Not sweet", "sweet", "clear_spelling_error", "Not sweet $4.99"),
+    ("Unsweetened", "Sweetened", "clear_spelling_error", "Unsweetened $4.99"),
+    ("2 Pak", "3 Pak", "clear_spelling_error", "2 Pak $4.99"),
+    ("Pak $4", "Pak $5", "clear_spelling_error", "Pak $4"),
+    ("Idly", "Idli", "ambiguous_variant", "Idly $4.99"),
+    ("Mysoore Pak", "Mysore Pak", "clear_spelling_error", "Mysoore and Pak are separate words"),
+    ("Mysoore Pak", "Mysore Pak", "clear_spelling_error", "XMysoore PakZ"),
+])
+def test_spelling_correction_rejects_unsafe_or_ambiguous_changes(original, corrected, judgment, raw):
+    facts, report = extract_text_facts_v2(FlyerRequestFields(), raw,
+        transport=lambda *_: json.dumps({"items": [{"name": original,
+            "corrected_name": corrected, "spelling_judgment": judgment}]}))
+    assert all(f.value != corrected for f in facts)
+    assert not report.spelling_corrections
+
+
+def test_spelling_does_not_change_protected_facts_or_registered_identity():
+    doc = {"business_name": "Mysoore Pak", "campaign_title": "Mysoore Pak",
+           "corrected_campaign_title": "Mysore Pak", "campaign_spelling_judgment": "clear_spelling_error",
+           "pricing_structure": "$4.99", "corrected_pricing_structure": "$5.99",
+           "contact_phone": "732-983-7841", "corrected_contact_phone": "732-983-7842",
+           "location": "90 Brybar Dr", "corrected_location": "91 Brybar Dr",
+           "schedule": "11 AM to 2 PM", "corrected_schedule": "12 PM to 3 PM"}
+    raw = "Mysoore Pak. $4.99. Phone 732-983-7841. Address 90 Brybar Dr. 11 AM to 2 PM."
+    facts, report = extract_text_facts_v2(FlyerRequestFields(), raw, profile_business_name="Mysoore Pak",
+        transport=lambda *_: json.dumps(doc))
+    assert {f.fact_id: f.value for f in facts} == {k: doc[k] for k in
+        ("business_name", "campaign_title", "pricing_structure", "contact_phone", "location", "schedule")}
+    assert not report.spelling_corrections
+
+
+def test_spelling_preserves_brand_word_embedded_in_campaign_or_item():
+    doc = {"business_name": "MysoorePak", "campaign_title": "MysoorePak Sale",
+        "corrected_campaign_title": "MysorePak Sale", "campaign_spelling_judgment": "clear_spelling_error",
+        "items": [{"name": "MysoorePak Special", "corrected_name": "MysorePak Special",
+                   "spelling_judgment": "clear_spelling_error"}]}
+    facts, report = extract_text_facts_v2(FlyerRequestFields(), "MysoorePak Sale. MysoorePak Special.",
+        profile_business_name="MysoorePak", transport=lambda *_: json.dumps(doc))
+    assert next(f.value for f in facts if f.fact_id == "campaign_title") == "MysoorePak Sale"
+    assert next(f.value for f in facts if f.fact_id == "item:0:name") == "MysoorePak Special"
+    assert not report.spelling_corrections
+
+
+def test_conflicting_casefolded_spelling_targets_reject_extraction():
+    with pytest.raises(ExtractionV2Error, match="conflicting spelling targets"):
+        extract_text_facts_v2(FlyerRequestFields(), "MysoorePak $4.99",
+            transport=lambda *_: json.dumps({
+                "campaign_title": "MysoorePak", "corrected_campaign_title": "MysorePak",
+                "campaign_spelling_judgment": "clear_spelling_error",
+                "items": [{"name": "mysoorepak", "corrected_name": "MysorrePak",
+                           "spelling_judgment": "clear_spelling_error"}]}))
+
+
+def test_bare_audit_retains_spelling_pair(monkeypatch):
+    from types import SimpleNamespace
+    from agents.flyer import bare_render, extraction_v2
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.setattr(extraction_v2, "_default_transport", lambda *_: json.dumps({
+        "items": [{"name": "Mysoore Pak", "corrected_name": "Mysore Pak",
+                   "spelling_judgment": "clear_spelling_error", "price": "$4.99"}]}))
+    rows = []
+    monkeypatch.setattr(bare_render, "_append_audit_line", lambda row: rows.append(json.loads(row)))
+    fields = FlyerRequestFields()
+    facts = bare_render._build_locked_facts(SimpleNamespace(status="", business_name=""),
+        fields, "Mysoore Pak $4.99", "spelling-bare", None)
+    assert next(f.value for f in facts if f.fact_id == "item:0:name") == "Mysore Pak"
+    assert rows[0]["seam"] == "bare_render"
+    assert "Mysoore Pak->Mysore Pak" in rows[0]["reason"]
+    assert fields.notes == "Mysore Pak $4.99"
+    from schemas import FlyerProject
+    from datetime import datetime, timezone
+    from agents.flyer.render import _poster_copy_plan
+    project = FlyerProject(project_id="F1234", status="intake_started", customer_phone="+15550100001",
+        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        original_message_id="spelling-bare", raw_request="Mysoore Pak $4.99", fields=fields, locked_facts=facts)
+    assert "Mysoore" not in str(_poster_copy_plan(project))
+
+
 def test_secondary_copy_cannot_drop_negation_from_source_clause():
     facts, report = extract_text_facts_v2(FlyerRequestFields(),
         "Not valid on weekends. TEST ONLY - NOT A REAL OFFER",
