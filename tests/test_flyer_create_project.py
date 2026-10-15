@@ -169,6 +169,35 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     assert "flier from" not in poisoned
 
 
+@pytest.mark.parametrize("campaign", ["Lunch Buffet", None])
+def test_managed_intake_projects_grounded_title_not_request_fragment(tmp_path, monkeypatch, capsys, campaign):
+    module = _load_script(monkeypatch)
+    from agents.flyer import extraction_v2
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.setattr(extraction_v2, "_default_transport", lambda *_: json.dumps({
+        "business_name": "Lakshmi's Kitchen", "campaign_title": campaign,
+        "pricing_structure": "Lunch Buffet $12.99 per person",
+        "schedule": "Valid weekdays 11am to 2pm through November 30",
+        "location": "123 Sample Road, Example City", "contact_phone": "202-555-0142",
+        "offers": [{"text": "TEST ONLY - NOT A REAL OFFER"}],
+    }))
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project", "--customer-phone", "+17329837841",
+        "--message-id", "synthetic-f0229-intake", "--raw-request",
+        "Hi, I need a flyer. Business: Lakshmi's Kitchen. Address: 123 Sample Road, Example City. "
+        "Phone: 202-555-0142. Offer: Lunch Buffet $12.99 per person. "
+        "Valid weekdays 11am to 2pm through November 30. TEST ONLY - NOT A REAL OFFER",
+        "--state-path", str(tmp_path / "projects.json"),
+        "--customer-state-path", str(tmp_path / "customers.json"),
+    ])
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["fields"]["event_or_business_name"] == (campaign or "Lakshmi's Kitchen")
+    assert project["fields"]["event_time"] == "Valid weekdays 11am to 2pm through November 30"
+    assert any(f["value"] == "TEST ONLY - NOT A REAL OFFER" and f["required"]
+               for f in project["locked_facts"])
+
+
 def test_flyer_project_store_accepts_legacy_rows_without_origin_fields():
     from schemas import FlyerProjectStore  # noqa: E402
 

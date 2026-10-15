@@ -115,7 +115,7 @@ def test_render_premium_branch_compose_import_resolves():
     # render_premium_poster_v1's compose import is try-flat/except-package; on this
     # machine the package arm resolves. Inject everything else so no model call runs.
     from agents.flyer import render
-    proj = SimpleNamespace(customer_phone="+15550100001", locked_facts=[
+    proj = SimpleNamespace(customer_phone="+15550100001", raw_request="", fields=SimpleNamespace(notes=""), assets=[], locked_facts=[
         SimpleNamespace(fact_id="business_name", value="Lakshmi's Kitchen"),
         SimpleNamespace(fact_id="pricing_structure", value="Any 2 snacks $9.99"),
         SimpleNamespace(fact_id="item:0:name", value="Punugulu"),

@@ -17,12 +17,13 @@ BOTTOM-RIGHT. Cover-crop removes both (top/bottom bands); letterbox keeps both.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 
 import pytest
 
 pytest.importorskip("PIL")
 
-from agents.flyer.render import render_final_package
+from agents.flyer.render import FlyerRenderError, render_final_package
 from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields
 
 RED = (220, 30, 30)
@@ -73,13 +74,57 @@ def _rawless_project(tmp_path, monkeypatch):
         locked_facts=[_F("business_name", "Lakshmi's Kitchen"),
                       _F("contact_phone", "+15550100001")],
         assets=[FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
-                           path=str(preview), mime_type="image/png", sha256="a" * 64,
+                           path=str(preview), mime_type="image/png", sha256=hashlib.sha256(preview.read_bytes()).hexdigest(),
                            original_message_id="m-ws2b", received_at=now)],
         concepts=[FlyerConcept(concept_id="C1", title="Best Design",
                                style_summary="v2 integrated render", preview_asset_id="A0001",
                                prompt="", created_at=now)],
         selected_concept_id="C1",
     )
+
+
+def test_replaced_selected_preview_refuses_before_any_final_export(tmp_path, monkeypatch):
+    from PIL import Image
+
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    with Image.open(preview) as image:
+        image.putpixel((100, 100), (0, 255, 0))
+        image.save(preview)
+    final_dir = tmp_path / "finals"
+    with pytest.raises(FlyerRenderError, match="preview.*hash mismatch"):
+        render_final_package(project, final_dir)
+    assert not final_dir.exists() or not list(final_dir.iterdir())
+
+
+@pytest.mark.parametrize("broken_binding", ["raw_changed", "manifest_missing", "preview_hash", "version"])
+def test_raw_recomposition_requires_preview_bound_source(tmp_path, monkeypatch, broken_binding):
+    import json
+    from agents.flyer import render
+    from PIL import Image
+
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    render.write_text_manifest(project, preview, output_format="concept_preview",
+                               selected_concept_id="C1", source_path=raw)
+    sidecar = render._text_manifest_path(preview)
+    if broken_binding == "raw_changed":
+        with Image.open(raw) as image:
+            image.putpixel((100, 100), (0, 255, 0))
+            image.save(raw)
+    elif broken_binding == "manifest_missing":
+        sidecar.unlink()
+    else:
+        manifest = json.loads(sidecar.read_text())
+        manifest["artifact_sha256" if broken_binding == "preview_hash" else "project_version"] = "wrong"
+        sidecar.write_text(json.dumps(manifest))
+    final_dir = tmp_path / "finals"
+    with pytest.raises(FlyerRenderError, match="raw background binding"):
+        render_final_package(project, final_dir)
+    assert not final_dir.exists() or not list(final_dir.iterdir())
 
 
 def test_rawless_fixed_formats_letterbox_never_crop(tmp_path, monkeypatch):
@@ -119,3 +164,67 @@ def test_same_aspect_whatsapp_is_byte_identical_to_old_path(tmp_path):
     _export_from_source_image(preview, old_out, size=(1080, 1350))
     _export_from_source_image_contained(preview, new_out, size=(1080, 1350))
     assert old_out.read_bytes() == new_out.read_bytes()
+
+@pytest.mark.parametrize("current_sha", ["b" * 64, None])
+def test_final_recomposition_refuses_changed_or_removed_logo(tmp_path, monkeypatch, current_sha):
+    from types import SimpleNamespace
+    from agents.flyer import render
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    render._OWNED_LOGO_RENDER_BINDING.set((str(preview), hashlib.sha256(preview.read_bytes()).hexdigest(), "a" * 64))
+    render.write_text_manifest(project, preview, output_format="concept_preview", selected_concept_id="C1", source_path=raw)
+    monkeypatch.setattr(render, "_selected_owned_logo", lambda _: SimpleNamespace(sha256=current_sha) if current_sha else None)
+    final_dir = tmp_path / "finals"
+    with pytest.raises(FlyerRenderError, match="raw background binding"):
+        render_final_package(project, final_dir)
+    assert not final_dir.exists() or not list(final_dir.iterdir())
+
+def test_final_logo_change_after_binding_check_is_refused(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agents.flyer import render
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    render._OWNED_LOGO_RENDER_BINDING.set((str(preview), hashlib.sha256(preview.read_bytes()).hexdigest(), "a" * 64))
+    render.write_text_manifest(project, preview, output_format="concept_preview", selected_concept_id="C1", source_path=raw)
+    selected = iter([SimpleNamespace(sha256="a" * 64), SimpleNamespace(sha256="b" * 64)])
+    monkeypatch.setattr(render, "_selected_owned_logo", lambda _: next(selected))
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda _: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda _: True)
+    def changed_compositor(project, source, target, **kwargs):
+        _pinned_preview(target)
+        return render.PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "in_process", kwargs["output_format"], "b" * 64)
+    monkeypatch.setattr(render, "_render_premium_overlay_with_fallback", changed_compositor)
+    with pytest.raises(FlyerRenderError, match="quality check.*owned logo"):
+        render_final_package(project, tmp_path / "finals")
+
+def test_owned_logo_provenance_survives_all_final_formats(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from PIL import Image
+    from agents.flyer import render
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    logo = tmp_path / "owned.png"
+    Image.new("RGB", (40, 30), (13, 211, 79)).save(logo)
+    logo_sha = hashlib.sha256(logo.read_bytes()).hexdigest()
+    asset = SimpleNamespace(kind="logo", notes="our logo", path=str(logo), sha256=logo_sha)
+    monkeypatch.setattr(render, "_active_brand_assets", lambda p, **kwargs: [asset])
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda _: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda _: True)
+    render._apply_critical_text_overlay(project, raw, preview, size=(1080, 1350), output_format="concept_preview")
+    project.assets[0].sha256 = hashlib.sha256(preview.read_bytes()).hexdigest()
+    render.write_text_manifest(project, preview, output_format="concept_preview", selected_concept_id="C1", source_path=raw)
+    finals = render_final_package(project, tmp_path / "finals")
+    assert len(finals) == 4
+    for spec in finals:
+        assert json.loads(render._text_manifest_path(spec.path).read_text())["owned_logo_sha256"] == logo_sha
+    assert hashlib.sha256(logo.read_bytes()).hexdigest() == logo_sha

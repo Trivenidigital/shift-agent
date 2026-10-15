@@ -197,11 +197,13 @@ class PremiumOverlayOutcome:
     reason_detail: str
     render_path: str     # in_process | subprocess | none
     output_format: str
+    owned_logo_sha256: str = ""
 
 
 _PREMIUM_OVERLAY_OUTCOME: contextvars.ContextVar[PremiumOverlayOutcome | None] = contextvars.ContextVar(
     "flyer_premium_overlay_outcome", default=None
 )
+_OWNED_LOGO_RENDER_BINDING = contextvars.ContextVar("flyer_owned_logo_render_binding", default=None)
 
 
 def consume_premium_overlay_outcome() -> PremiumOverlayOutcome | None:
@@ -768,6 +770,12 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
         if is_menu_item_aggregate(value):
             return
         normalized = _normalize_fact_text(value)
+        # A labeled raw-input echo is not a second offer. Only collapse it
+        # when the entire value after the label equals copy already retained;
+        # distinct offers sharing the same price must remain distinct.
+        labeled = re.match(r"^(?:offer|pricing)\s*:\s*(.+)$", value, re.IGNORECASE)
+        if labeled and _normalize_fact_text(labeled.group(1)) in seen:
+            return
         if normalized in seen:
             return
         seen.add(normalized)
@@ -1080,6 +1088,8 @@ def _same_text(left: str, right: str) -> bool:
 
 
 _INSTRUCTION_TITLE_TOKENS = {
+    "i", "we", "a", "an", "the", "me", "us", "you", "can", "could", "would",
+    "want", "like", "to", "hi", "hello",
     "create",
     "make",
     "generate",
@@ -1411,6 +1421,8 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     """
     if _FORCE_BACKGROUND_ONLY.get():
         return False
+    if _premium_overlay_enabled(project) and _selected_owned_logo(project) is not None:
+        return False  # exact identity belongs to the deterministic overlay
     if getattr(project, "deterministic_recovery", False):
         return False
     if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
@@ -1525,7 +1537,21 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                 _hero_name = (_cd.get("hero_name") or "").strip()
                 _theme_family = (_cd.get("theme_family") or "").strip()
                 _mood = (_cd.get("mood") or "").strip()
-            if _hero_name or _theme_family or _mood:
+            # A buffet is the advertised offering, not a single menu dish.
+            # Use already-resolved copy to avoid contradicting the brief with
+            # the legacy single-dish/no-buffet background direction.
+            _buffet_offer = bool(re.search(
+                r"\bbuffet\b", " ".join([plan.title, *plan.detail_lines]), re.IGNORECASE
+            ))
+            if _buffet_offer:
+                _hero_line = (
+                    "- Compose a wordless buffet photograph matching the advertised buffet: "
+                    "a coherent appetizing buffet presentation with warm cinematic lighting "
+                    "and natural food texture. Let the food dominate the frame. "
+                    "Do not portray a single plated dish as the whole buffet or imply "
+                    "specific included menu items that the brief does not confirm.\n"
+                )
+            elif _hero_name or _theme_family or _mood:
                 # CD-v2 observability (census D10): the resolved carrier is now
                 # shaping this prompt — mark the render's outcome consumed.
                 _cdv2_out = _CREATIVE_DIRECTION_V2_OUTCOME.get()
@@ -1561,8 +1587,10 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                     "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
                     "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
                     "do NOT leave empty flat bands or blank panels.\n"
-                    "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
-                    "separate dishes — ONE hero dish is the subject.\n"
+                    + ("- No people, no faces, no hands, no diners; the buffet is the subject.\n"
+                       if _buffet_offer else
+                       "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+                       "separate dishes — ONE hero dish is the subject.\n")
                 )
             )
         else:
@@ -1757,6 +1785,11 @@ def write_text_manifest(
         blockers.append("duplicate critical text fact ids: " + ", ".join(sorted(set(duplicate_ids))))
     blockers.extend(_instruction_leak_blockers(expected))
     blockers.extend(_instruction_leak_blockers(rendered))
+    logo_binding = _OWNED_LOGO_RENDER_BINDING.get()
+    painted_logo_sha = ""
+    if (logo_binding and logo_binding[0] == str(artifact) and artifact.exists()
+            and logo_binding[1] == _sha256(artifact)):
+        painted_logo_sha = logo_binding[2]
     manifest = {
         "schema_version": TEXT_MANIFEST_SCHEMA_VERSION,
         "project_id": project.project_id,
@@ -1775,6 +1808,7 @@ def write_text_manifest(
         # verification_mode (whose "declared_render_facts" default is stamped by
         # integrated/reference/repair renders too), this is composer-specific.
         "masthead_painted_by": masthead_painted_by,
+        "owned_logo_sha256": painted_logo_sha,
         # Additive honesty fields (2026-05-20): `rendered_facts` is a copy of
         # `expected_facts` because this manifest declares the facts the
         # renderer was asked to draw, not the facts proven present in
@@ -2024,6 +2058,16 @@ def _generation_brand_assets(project: FlyerProject):
     ]
 
 
+def _selected_owned_logo(project: FlyerProject):
+    """Select identity with the same customer, active and ownership gates as generation."""
+    logos = [a for a in _active_brand_assets(project, include_missing=True)
+             if a.kind == "logo" and _looks_like_owned_logo_asset(a)]
+    if _reference_upload_is_owner_confirmed(project):
+        logos.extend(a for a in _project_reference_assets(project, include_missing=True)
+                     if a.kind == "logo" and _looks_like_owned_logo_asset(a))
+    return logos[-1] if logos else None
+
+
 def _project_disables_saved_brand_assets(project: FlyerProject) -> bool:
     for fact in getattr(project, "locked_facts", []) or []:
         if getattr(fact, "fact_id", "") != "render:disable_brand_assets":
@@ -2034,7 +2078,7 @@ def _project_disables_saved_brand_assets(project: FlyerProject) -> bool:
     return False
 
 
-def _active_brand_assets(project: FlyerProject):
+def _active_brand_assets(project: FlyerProject, *, include_missing: bool = False):
     if os.environ.get("FLYER_DISABLE_BRAND_ASSETS") == "1" or _project_disables_saved_brand_assets(project):
         return []
     if "FLYER_CUSTOMERS_PATH" in os.environ:
@@ -2052,7 +2096,7 @@ def _active_brand_assets(project: FlyerProject):
     customer = store.find_customer_by_phone(str(project.customer_phone))
     if not customer:
         return []
-    return [asset for asset in customer.brand_assets if asset.active and Path(asset.path).exists()]
+    return [asset for asset in customer.brand_assets if asset.active and (include_missing or Path(asset.path).exists())]
 
 
 def _registered_business_name(project: FlyerProject) -> str:
@@ -2260,10 +2304,10 @@ def _campaign_scene_block_for_project(project: FlyerProject, *, context: str, bu
     )
 
 
-def _project_reference_assets(project: FlyerProject):
+def _project_reference_assets(project: FlyerProject, *, include_missing: bool = False):
     return [
         asset for asset in project.assets
-        if asset.kind in {"logo", "reference_image"} and Path(asset.path).exists()
+        if asset.kind in {"logo", "reference_image"} and (include_missing or Path(asset.path).exists())
     ]
 
 
@@ -2301,6 +2345,11 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _generation_brand_assets(project)
     refs = _project_reference_assets(project)
+    if (_background_only_eligible(project) or force_background_only) and _premium_overlay_enabled(project):
+        # Logo/template identity is composited later; supplying it here invites
+        # the background model to paint another masthead. Keep user imagery.
+        brand_assets = []
+        refs = [asset for asset in refs if asset.kind != "logo"]
     if _style_only_reference_requested(project):
         # Style-only means "do not copy source branding/text", not "hide the
         # reference from the art director." The prompt and QA already enforce
@@ -2634,7 +2683,47 @@ def _resolve_style_directives(project: FlyerProject) -> tuple[str, str, str]:
     return register_block, typeset_section, ban_line
 
 
+def _background_image_prompt(project, *, size, scene_direction=None) -> str:
+    """Imagery-only view of the existing overlay contract, without poster copy."""
+    plan = _poster_copy_plan(project)
+    subjects = ", ".join(_sanitize_visual_context(name) for name, _price in plan.items)
+    # Keep structured art-direction taste, not its full-poster scene or raw
+    # customer/revision prose (which can contain instructions to paint text).
+    taste = []
+    theme = _sanitize_visual_context(str(getattr(scene_direction, "theme_family", "") or ""))
+    if theme:
+        taste.append("unlabeled imagery theme: " + theme)
+    for field in ("visual_subjects", "palette", "motifs"):
+        values = getattr(scene_direction, field, None) or []
+        if values:
+            taste.append(f"{field}: " + ", ".join(_sanitize_visual_context(str(v)) for v in values))
+    placement = ""
+    if _premium_overlay_enabled(project):
+        overlay_copy = _menu_overlay_payload(project)
+        placement = (
+            "Keep the top ~28% and bottom ~14% naturally darker and calm. "
+            if not overlay_copy["items"] and not overlay_copy["shared_offer_price"] else
+            "Keep the top ~22% and bottom ~32% naturally darker and calm. "
+        )
+    return (
+        "Create a wordless decorative BACKGROUND photograph only.\n"
+        f"Aspect ratio: {_aspect_ratio(size)}.\n"
+        + (f"Photographic subjects (unlabeled): {subjects}.\n" if subjects else "")
+        + ("Visual styling only: " + "; ".join(taste) + ".\n" if taste else "")
+        + _poster_layout_requirements(project, force_background_only=True)
+        + "\n" + placement
+        + "Use one continuous full-frame image; no hard horizontal boundaries, "
+        "no blurred letterbox panels, and no empty menu band.\n"
+        "Any attached reference is for imagery, palette and texture only. "
+        "Do not reproduce its lettering, logo, signage or layout panels. "
+        "Do not draw words, letters, numbers, logos, watermarks, prices or contact details. "
+        "All identity and customer copy will be composited separately.\n"
+    )
+
+
 def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> str:
+    if (_background_only_eligible(project) or force_background_only) and _premium_overlay_enabled(project):
+        return _background_image_prompt(project, size=size, scene_direction=scene_direction)
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
@@ -2685,10 +2774,19 @@ Autonomous repair instruction:
             # a bare flag read, so a non-allowlisted customer is not steered toward an
             # overlay layout that will never be composited. Last allowlist-bypassing
             # read after the Phase A unification (census C5).
-            text_contract_line += (
-                " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
-                "(negative space for a text overlay); place the hero food in the centre band."
-            )
+            overlay_copy = _menu_overlay_payload(project)
+            if not overlay_copy["items"] and not overlay_copy["shared_offer_price"]:
+                text_contract_line += (
+                    " Keep the top ~28% and bottom ~14% naturally darker and calm for text. "
+                    "Use one continuous full-frame photograph with the food filling the remaining "
+                    "space; no hard horizontal boundaries, no blurred letterbox panels, "
+                    "and no empty menu band."
+                )
+            else:
+                text_contract_line += (
+                    " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
+                    "(negative space for a text overlay); place the hero food in the centre band."
+                )
         # Overlay owns ALL text → the language hint must NOT instruct text/script
         # rendering (that would reintroduce model-painted, garbled non-English text).
         # Reflect language/culture in IMAGERY only.
@@ -3658,10 +3756,11 @@ except Exception as e:
     sys.stderr.write(f"{type(e).__name__}: {e}")
     sys.exit(1)  # import/serialization error -> unexpected
 try:
-    premium_overlay.render_premium_overlay(
+    logo_sha = premium_overlay.render_premium_overlay(
         project, Path(spec["source"]), Path(spec["target"]),
         size=tuple(spec["size"]), output_format=spec["output_format"],
     )
+    sys.stdout.write(json.dumps({"owned_logo_sha256": logo_sha or ""}))
 except Exception as e:
     # FlyerRenderError = intentional fit/coverage fail-closed -> exit 3 ;
     # anything else = unexpected renderer crash -> exit 1.
@@ -3711,8 +3810,8 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
             import flyer_premium_overlay as premium_overlay  # box (flat layout)
         except ImportError:
             from agents.flyer import premium_overlay          # repo / tests
-        premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
-        return PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "in_process", output_format)
+        logo_sha = premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
+        return PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "in_process", output_format, logo_sha or "")
     except FlyerRenderError as e:
         msg = str(e)
         return PremiumOverlayOutcome("premium_overlay_degraded_to_flat", _classify_fail_closed_reason(msg), msg[:300], "none", output_format)
@@ -3754,7 +3853,11 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
             except OSError:
                 pass
     if proc.returncode == 0:
-        return PremiumOverlayOutcome("premium_overlay_delivered", "none", in_process_detail[:300], "subprocess", output_format)
+        try:
+            logo_sha = json.loads(proc.stdout or "{}").get("owned_logo_sha256", "")
+        except (ValueError, AttributeError):
+            logo_sha = ""
+        return PremiumOverlayOutcome("premium_overlay_delivered", "none", in_process_detail[:300], "subprocess", output_format, logo_sha)
     detail = (proc.stderr or proc.stdout or "").strip()
     if proc.returncode == 3:
         return PremiumOverlayOutcome("premium_overlay_degraded_to_flat", _classify_fail_closed_reason(detail), detail[:300], "none", output_format)
@@ -3763,10 +3866,23 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
 
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
     if _premium_overlay_enabled(project) and _is_food_or_grocery_project(project):
+        _OWNED_LOGO_RENDER_BINDING.set(None)
+        owned_logo = _selected_owned_logo(project)
         outcome = _render_premium_overlay_with_fallback(project, source, target, size=size, output_format=output_format)
         _PREMIUM_OVERLAY_OUTCOME.set(outcome)
         if outcome.status == "premium_overlay_delivered":
+            if owned_logo is not None and outcome.owned_logo_sha256 != owned_logo.sha256.lower():
+                raise FlyerRenderError("quality check failed: owned logo compositor proof missing or mismatched")
+            if outcome.owned_logo_sha256:
+                _OWNED_LOGO_RENDER_BINDING.set((str(target), _sha256(Path(target)), outcome.owned_logo_sha256))
             return
+        if owned_logo is not None:
+            # The flat fallback cannot carry this logo. The existing generation
+            # handler classifies quality-check errors as manual review, rather
+            # than retrying through a deterministic render that drops identity.
+            raise FlyerRenderError(
+                f"quality check failed: owned logo could not be preserved: {outcome.reason_detail}"
+            )
         if outcome.status == "premium_overlay_failed_unexpected":
             logging.getLogger(__name__).error(
                 "premium overlay failed unexpectedly (%s); degrading to flat overlay: %s",
@@ -4279,6 +4395,7 @@ def _premium_poster_v1_eligible(project: FlyerProject) -> bool:
     Deliberately NOT gated on _background_only_eligible — food menu flyers are
     _integrated_poster_eligible today, and the premium poster is their replacement."""
     return (_is_food_or_grocery_project(project)
+            and _selected_owned_logo(project) is None
             and _premium_poster_v1_required_facts_present(project)
             and not _needs_reference_extraction(project)
             and not _premium_poster_v1_composer_unfit(project))
@@ -5234,6 +5351,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
     the real image model / vision OCR / oracle. The existing visual_qa / visible-
     contract / send gates run on ``target`` downstream, unchanged + authoritative."""
     n = _premium_poster_v1_n() if n is None else n
+    if _selected_owned_logo(project) is not None:
+        return PremiumPosterV1Outcome(False, "skipped", "owned_logo_requires_overlay", n, -1, None, output_format)
     if size != (1080, 1350):  # only the concept-preview size in this slice; PDF/other -> existing path
         return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format)
     deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
@@ -5385,6 +5504,11 @@ def _ppv1_candidate_status_summary(report: dict) -> str:
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
+        if _premium_overlay_enabled(project) and _selected_owned_logo(project) is not None:
+            if (model.strip().lower() in DETERMINISTIC_MODEL_NAMES
+                    or not _is_food_or_grocery_project(project)
+                    or (not force_background_only and not _background_only_eligible(project))):
+                raise FlyerRenderError("quality check failed: owned logo requires supported premium overlay placement")
         # Premium Poster v1 (render-path opt-in + flag + allowlist + food/grocery +
         # required facts). On success writes `path` and returns; ANY miss falls
         # through to the existing render below (byte-identical when not armed). The
@@ -5588,13 +5712,15 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         path.unlink(missing_ok=True)
         raw_path.unlink(missing_ok=True)
         raise FlyerRenderError(f"edited concept failed quality check: {quality_report.blockers}")
-    reference = _source_edit_reference_asset(project)
     write_text_manifest(
         project,
         path,
         output_format="concept_preview",
         selected_concept_id=concept_id,
-        source_path=reference.path,
+        # Finals recompose this edited raw background. The original reference
+        # keeps its own asset/fact provenance; this binding records the bytes
+        # actually used to compose the preview being approved.
+        source_path=raw_path,
         # The output is the customer's uploaded artwork with the deterministic text
         # overlay RE-COMPOSED on top — not a pixel-preserving integrity edit — so the
         # manifest declares the overlaid facts (corroborating visual QA) rather than
@@ -5692,6 +5818,10 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             asset = next((a for a in project.assets if a.asset_id == concept.preview_asset_id), None)
             if asset is not None:
                 candidate = Path(asset.path)
+                # Preview paths can be reused by later renders. Final exports
+                # must still use the bytes recorded for the selected asset.
+                if candidate.is_file() and _sha256(candidate) != asset.sha256.lower():
+                    raise FlyerRenderError("selected preview artifact hash mismatch")
                 quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
                 if quality_report.ok:
                     selected_preview = candidate
@@ -5711,6 +5841,8 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
         source_for_manifest: Path | None = None
+        expected_logo_sha: str | None = None
+        _OWNED_LOGO_RENDER_BINDING.set(None)
         verification_mode = "source_edit_overlay_recomposed"
         manifest_warnings = [
             "Source edit: customer artwork with the deterministic text overlay re-composed on top; final files derive from the approved preview. Required facts are declared and visual-QA-checked."
@@ -5761,6 +5893,29 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             )
             if direct_poster_source:
                 source = selected_preview
+            else:
+                # Recomposition consumes the raw sidecar, not the approved PNG.
+                # Bind both bytes to the preview's existing producer manifest;
+                # mtime alone cannot distinguish a replaced raw background.
+                try:
+                    binding = json.loads(_text_manifest_path(selected_preview).read_text(encoding="utf-8"))
+                    selected_logo = _selected_owned_logo(project)
+                    current_logo_sha = selected_logo.sha256.lower() if selected_logo is not None else ""
+                    bound = (
+                        isinstance(binding, dict)
+                        and binding.get("project_id") == project.project_id
+                        and binding.get("project_version") == project.version
+                        and binding.get("selected_concept_id") == concept_id
+                        and binding.get("output_format") == "concept_preview"
+                        and binding.get("artifact_sha256") == selected_preview_asset.sha256.lower()
+                        and binding.get("source_sha256") == _sha256(source)
+                        and binding.get("owned_logo_sha256", "") == current_logo_sha
+                    )
+                except (OSError, ValueError, TypeError):
+                    bound = False
+                if not bound:
+                    raise FlyerRenderError("approved preview raw background binding missing or mismatched")
+                expected_logo_sha = binding.get("owned_logo_sha256", "")
             if manual_completed_operator_preview:
                 verification_mode = "source_edit_integrity_only"
                 manifest_warnings = [
@@ -5818,6 +5973,14 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                     temp_png.unlink(missing_ok=True)
         else:
             _render_model(project, path, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality)
+        if expected_logo_sha is not None:
+            painted_binding = _OWNED_LOGO_RENDER_BINDING.get()
+            actual_logo_sha = painted_binding[2] if painted_binding else ""
+            if actual_logo_sha != expected_logo_sha:
+                path.unlink(missing_ok=True)
+                raise FlyerRenderError("quality check failed: owned logo changed during final composition")
+            if actual_logo_sha:
+                _OWNED_LOGO_RENDER_BINDING.set((str(path), _sha256(path), actual_logo_sha))
         width, height = size or (1275, 1650)
         quality_report = inspect_rendered_asset(path, expected_width=width, expected_height=height, mime_type="application/pdf" if size is None else "image/png")
         if not quality_report.ok:

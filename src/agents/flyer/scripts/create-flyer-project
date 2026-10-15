@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 from datetime import datetime, timezone
@@ -782,6 +783,21 @@ def main() -> int:
                 report_out=_extraction_report_sink,
             ),
         )
+        # Structured extraction owns the copy. Keep legacy fields aligned with
+        # its grounded facts instead of promoting a regex request fragment.
+        # Retain the legacy flag-off contract during the extraction rollout.
+        if os.environ.get("FLYER_EXTRACTION_V2") == "1":
+            grounded = {fact.fact_id: str(fact.value).strip() for fact in locked_facts if fact.value}
+            fields = fields.model_copy(update={
+                "event_or_business_name": (
+                    grounded.get("campaign_title") or grounded.get("headline")
+                    or grounded.get("business_name") or None
+                ),
+                # Longer schedules remain losslessly stored in locked facts;
+                # the legacy time slot is bounded to 80 characters.
+                "event_time": (grounded["schedule"] if len(grounded["schedule"]) <= 80 else None)
+                if grounded.get("schedule") else fields.event_time,
+            })
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
         # reference) did not surface every required fact slot, queue for manual
         # review rather than rendering a project the system knows is incomplete.

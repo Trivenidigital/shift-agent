@@ -10,6 +10,7 @@ stamping the delivery row with ``pdf_qa_status``.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import json
 import sys
@@ -140,7 +141,7 @@ def test_render_final_package_direct_path_writes_pdf_twin(tmp_path, monkeypatch)
         locked_facts=[_F("business_name", "Lakshmi's Kitchen"),
                       _F("contact_phone", "+15550100001")],
         assets=[FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
-                           path=str(preview), mime_type="image/png", sha256="a" * 64,
+                           path=str(preview), mime_type="image/png", sha256=hashlib.sha256(preview.read_bytes()).hexdigest(),
                            original_message_id="m-ws5", received_at=now)],
         concepts=[FlyerConcept(concept_id="C1", title="Best Design",
                                style_summary="v2 integrated render", preview_asset_id="A0001",
@@ -384,7 +385,7 @@ def _backfill_store(tmp_path: Path, *, with_preview: bool) -> Path:
         preview = tmp_path / "F9505-C1-preview.png"
         preview.write_bytes(b"preview-raster-bytes")
         assets.append(FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
-                                 path=str(preview), mime_type="image/png", sha256="a" * 64,
+                                 path=str(preview), mime_type="image/png", sha256=hashlib.sha256(preview.read_bytes()).hexdigest(),
                                  original_message_id="m-bf", received_at=now))
         concepts.append(FlyerConcept(concept_id="C1", title="Best", style_summary="s",
                                      preview_asset_id="A0001", prompt="", created_at=now))

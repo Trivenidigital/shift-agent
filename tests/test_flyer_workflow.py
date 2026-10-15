@@ -333,6 +333,22 @@ def test_extract_revision_field_updates_handles_date_and_time_change():
     }
 
 
+def test_full_brief_restatement_is_not_end_time_change_or_applied_edit():
+    text = ("Business: Lakshmi's Kitchen. Address: 90 Brybar Dr, St Johns FL. "
+            "Phone: 732-983-7841. Offer: Lunch Buffet $12.99 per person. "
+            "Valid weekdays 11am to 2pm through November 30. TEST ONLY - NOT A REAL OFFER")
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Lunch Buffet", event_time="11:00",
+        venue_or_location="90 Brybar Dr, St Johns FL", contact_info="732-983-7841",
+        notes=text,
+    ))
+    patch = extract_revision_patch(project, text)
+    assert patch.field_updates == {}
+    assert not patch.changed
+    assert not patch.already_applied
+    assert not patch.visual_only
+
+
 def test_extract_revision_patch_handles_price_title_phone_and_venue_changes():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast",

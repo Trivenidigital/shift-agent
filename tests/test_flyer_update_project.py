@@ -169,6 +169,118 @@ def test_noop_revision_preserves_existing_project_state(tmp_path, monkeypatch, c
     assert json.loads(state_path.read_text(encoding="utf-8")) == json.loads(original)
 
 
+def test_full_brief_restatement_preserves_version_assets_and_schedule(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    text = ("Business: Lakshmi's Kitchen. Address: 123 Sample Road, Example City. "
+            "Phone: 202-555-0142. Offer: Lunch Buffet $12.99 per person. "
+            "Valid weekdays 11am to 2pm through November 30. TEST ONLY - NOT A REAL OFFER")
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval"))
+    project = store["projects"][0]
+    project["raw_request"] = text
+    project["fields"].update(event_or_business_name="Lunch Buffet", event_time="11:00",
+                              venue_or_location="123 Sample Road, Example City",
+                              contact_info="202-555-0142", notes=text)
+    project["locked_facts"] = [{"fact_id": "schedule", "label": "Schedule",
+        "value": "Valid weekdays 11am to 2pm through November 30",
+        "source": "customer_text", "required": True}]
+    state_path = tmp_path / "projects.json"
+    original = json.dumps(store)
+    state_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["update-flyer-project", "--project-id", "F9001",
+        "--revision-text", text, "--message-id", "synthetic-f0229-restatement",
+        "--state-path", str(state_path)])
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is True
+    assert not payload["revision_patch"]["changed"]
+    assert state_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("revision", ["Change time to 4 PM.", "Change time from 11 AM to 4 PM."])
+def test_scalar_time_revision_of_locked_range_requires_clarification(tmp_path, monkeypatch, capsys, revision):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval"))
+    project = store["projects"][0]
+    project["fields"]["event_time"] = "11:00"
+    project["locked_facts"] = [{"fact_id": "schedule", "label": "Schedule",
+        "value": "Weekdays 11 AM to 2 PM", "source": "customer_text", "required": True}]
+    path = tmp_path / "projects.json"
+    original = json.dumps(store)
+    path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["update-flyer-project", "--project-id", "F9001",
+        "--revision-text", revision, "--message-id", "synthetic-range-edit", "--state-path", str(path)])
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is True
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("headline", [None, "Weekend Breakfast", "Freshly cooked every morning"])
+def test_explicit_title_revision_updates_rendered_locked_title(tmp_path, monkeypatch, capsys, headline):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval"))
+    project = store["projects"][0]
+    project["fields"]["event_or_business_name"] = "Weekend Breakfast"
+    project["locked_facts"] = [{"fact_id": "campaign_title", "label": "Campaign",
+        "value": "Weekend Breakfast", "source": "customer_text", "required": True}]
+    if headline:
+        project["locked_facts"].append({"fact_id": "headline", "label": "Headline",
+            "value": headline, "source": "customer_text", "required": True})
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps(store), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["update-flyer-project", "--project-id", "F9001",
+        "--revision-text", "Title should be Lunch Buffet, not Weekend Breakfast.",
+        "--message-id", "synthetic-title-edit", "--state-path", str(path)])
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+    from schemas import FlyerProject
+    from agents.flyer.render import _display_title
+    updated = FlyerProject.model_validate(json.loads(path.read_text())["projects"][0])
+    assert _display_title(updated) == "Lunch Buffet"
+    assert updated.fields.event_or_business_name == "Lunch Buffet"
+    if headline:
+        expected = "Lunch Buffet" if headline == "Weekend Breakfast" else headline
+        assert next(f.value for f in updated.locked_facts if f.fact_id == "headline") == expected
+
+
+def test_exact_full_schedule_revision_updates_rendered_schedule(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    old, new = "Weekdays 11 AM to 2 PM", "Weekdays 12 PM to 3 PM"
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval", raw_request=old))
+    project = store["projects"][0]
+    project["fields"]["notes"] = old
+    project["locked_facts"] = [{"fact_id": "schedule", "label": "Schedule",
+        "value": old, "source": "customer_text", "required": True}]
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps(store), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["update-flyer-project", "--project-id", "F9001",
+        "--revision-text", f'Replace "{old}" with "{new}".',
+        "--message-id", "synthetic-full-schedule-edit", "--state-path", str(path)])
+    assert module.main() == 0
+    assert json.loads(capsys.readouterr().out)["revision_requires_clarification"] is False
+    from schemas import FlyerProject
+    from agents.flyer.render import _display_schedule
+    updated = FlyerProject.model_validate(json.loads(path.read_text())["projects"][0])
+    assert _display_schedule(updated) == new
+
+
+def test_title_sync_does_not_replace_profile_owned_fact(monkeypatch):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerProject, FlyerLockedFact
+    project = FlyerProject(project_id="F9001", status="awaiting_final_approval", customer_phone="+15550100001",
+        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        original_message_id="synthetic", raw_request="Lunch Buffet",
+        locked_facts=[FlyerLockedFact(fact_id="campaign_title", label="Title", value="Lunch Buffet",
+                                      source="customer_profile")])
+    with pytest.raises(SystemExit, match="locked by another source"):
+        module._sync_render_field_locked_facts(project, {"event_or_business_name": "New Title"}, message_id="x")
+
+
 def test_visible_time_text_revision_does_not_request_clarification(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)

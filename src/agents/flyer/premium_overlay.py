@@ -508,6 +508,28 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # existing layout untouched → byte-identical.
     message_first = cd_poster_archetype == "message_first"
 
+    # Saved active logos belong to the resolved customer; uploaded logos also
+    # need the existing explicit ownership claim. Never treat a style template
+    # or reference as identity, and never ask the image model to redraw a logo.
+    logo_asset = render._selected_owned_logo(project)
+    owned_logo = None
+    if logo_asset is not None:
+        import hashlib
+        import io
+        asset = logo_asset
+        try:
+            logo_bytes = Path(asset.path).read_bytes()
+            if hashlib.sha256(logo_bytes).hexdigest() != str(asset.sha256).lower():
+                raise render.FlyerRenderError("owned logo content hash mismatch")
+            with Image.open(io.BytesIO(logo_bytes)) as logo:
+                owned_logo = logo.convert("RGBA")
+        except render.FlyerRenderError:
+            raise
+        except Exception as exc:
+            raise render.FlyerRenderError("owned logo unreadable") from exc
+        if message_first:
+            raise render.FlyerRenderError("owned logo placement unsupported for message_first overlay")
+
     # ===================================================================
     # PHASE-1 CONTRACT (Codex FINAL review, FINDING 1 BLOCKER): ONLY the
     # message_first (A) template is built in Phase 1. EVERY other archetype —
@@ -640,7 +662,22 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             img = bg.convert("RGB")
             if img.size != size:
                 img = img.resize(size)
-        img = compose_scrims(img, top_frac=0.22, bottom_frac=0.40)
+        # A sparse offer needs a footer scrim, not an empty menu-height panel.
+        sparse_offer = not items and not shared_offer_price
+        footer_px = max(min_px, int(width * (0.028 if sparse_offer else 0.0185)))
+        footer_text = "   |   ".join(p for p in (schedule, location, contact) if p)
+        footer_measure = ImageDraw.Draw(img, "RGBA")
+        footer_lines = _wrap_premium(
+            footer_measure, footer_text, "footer", footer_px,
+            width - max(28, int(width * 0.05)) * 2,
+        ) if footer_text else []
+        footer_height = len(footer_lines) * int(footer_px * 1.35)
+        bottom_frac = 0.40
+        if sparse_offer:
+            bottom_frac = min(0.40, (
+                footer_height + max(28, int(width * 0.05)) + height * 0.05
+            ) / height)
+        img = compose_scrims(img, top_frac=0.22, bottom_frac=bottom_frac)
         draw = ImageDraw.Draw(img, "RGBA")
 
         margin = max(28, int(width * 0.05))
@@ -664,32 +701,40 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         ring_top  = int(height * 0.0415)           # ≈56px @1350
         ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
 
-        draw.ellipse(
-            (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
-            outline=_EMBLEM_GOLD,
-            width=3,
-        )
+        if owned_logo is not None:
+            logo = owned_logo.copy()
+            # Preserve aspect ratio and transparency, never crop or synthesize
+            # logo pixels. Small originals retain their native resolution.
+            logo.thumbnail((ring_half * 4, ring_half * 2), Image.Resampling.LANCZOS)
+            logo_x = cx_top - logo.width // 2
+            logo_y = ring_top + (ring_bot - ring_top - logo.height) // 2
+            img.paste(logo, (logo_x, logo_y), logo)
+        else:
+            draw.ellipse(
+                (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
+                outline=_EMBLEM_GOLD,
+                width=3,
+            )
 
         # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
         mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
         mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
         monogram  = _brand_monogram(business) if business else ""
-        if monogram:
+        if monogram and owned_logo is None:
             mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
             _draw_centered(draw, monogram, mono_font,
                            cy=mono_cy, width=width,
                            fill=_EMBLEM_GOLD, shadow=None)
 
-        # Brand name: letter-spaced small-caps below the ring.
+        # Brand name: natural word spacing survives the word-wrap routine.
+        # Tracking every character with thin spaces makes split()/join() erase
+        # the distinction between letter spacing and the actual business words.
         y = ring_bot + max(10, int(height * 0.010))
         if business:
-            brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
+            brand_px   = max(min_px, int(width * 0.039))
             brand_font = _premium_font("masthead", brand_px)
             brand_text = _spaced_caps(business)
-            # Inline letter-spacing: interleave extra thin spaces between characters
-            # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
-            brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
-            brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
+            brand_lines  = _wrap_premium(draw, brand_text, "masthead", brand_px, safe_w)
             for ln in brand_lines:
                 _draw_centered(draw, ln, brand_font,
                                cy=y, width=width,
@@ -746,7 +791,6 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # FOOTER — schedule | location | contact (anchored to the bottom)
         # Drawn first so the menu/title/seal can use the space above it.
         # ===================================================================
-        footer_px = max(min_px, int(width * 0.0185))
         footer_parts = [p for p in (schedule, location, contact) if p]
         footer_text = "   |   ".join(footer_parts)
         footer_font = _premium_font("footer", footer_px)
@@ -1665,13 +1709,13 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # _compose has no hook; adapt the 2-arg dispatch to its 1-arg signature.
         if not cd_narrative:
             _compose(include_narrative=False)
-            return
+            return logo_asset.sha256.lower() if owned_logo is not None else ""
         try:
             _compose(include_narrative=True)
         except render.FlyerRenderError:
             _LAST_NARRATIVE_DROP.append(True)
             _compose(include_narrative=False)
-        return
+        return logo_asset.sha256.lower() if owned_logo is not None else ""
 
     # message_first: hook-first drop ladder.
     if not cd_narrative and not cd_hook_text:
