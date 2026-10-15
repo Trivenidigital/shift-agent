@@ -84,3 +84,18 @@ def test_integrated_poster_still_receives_customer_copy(monkeypatch):
     assert "complete, finished" in prompt
     assert "Synthetic Kitchen" in prompt
     assert "$12.99" in prompt
+
+
+def test_premium_background_keeps_nonfood_category_safeguard(monkeypatch):
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    monkeypatch.setattr(render, "_premium_overlay_enabled", lambda _: True)
+    monkeypatch.setattr(render, "_is_food_or_grocery_project", lambda _: False)
+    p = project()
+    p.locked_facts = [FlyerLockedFact(fact_id=k, label=k, value=v,
+        source="customer_text", required=True) for k, v in [
+        ("business_name", "Sample Salon"), ("campaign_title", "Haircuts"),
+        ("item:1:name", "Haircut"), ("item:1:price", "$25")]]
+    p.raw_request = "Salon haircut promotion"
+    prompt = render._image_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "category-appropriate service imagery" in prompt
+    assert "HERO food photograph" not in prompt

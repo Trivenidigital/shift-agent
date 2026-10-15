@@ -1519,7 +1519,7 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             "menu/item cards, price tags, schedule, location, or contact — the exact text is "
             "composited afterwards into overlay panels.\n"
         )
-        if _premium_overlay_enabled(project):
+        if _premium_overlay_enabled(project) and _is_food_or_grocery_project(project):
             # Fix C v2.1 (SCOPED): Restaurant-Promo single-hero background. Replaces the
             # reserved-zone banding (which yielded a flat multi-item spread → template) with a
             # cinematic single-hero composition; the deterministic overlay's own gradient
@@ -1578,12 +1578,16 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                     "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
                     "vibrant, and atmospheric.\n"
                 )
-            reserve += (
+            reserve = (
+                "- Produce one continuous wordless BACKGROUND photograph, as a single exposure "
+                "through one camera lens. Keep perspective, lighting and depth of field coherent "
+                "throughout the scene. Do not draw any text.\n"
+                +
                 _hero_line
                 + (
                     "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
                     "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
-                    "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+                    "advertisement layout.\n"
                     "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
                     "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
                     "do NOT leave empty flat bands or blank panels.\n"
@@ -1593,6 +1597,9 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                        "separate dishes — ONE hero dish is the subject.\n")
                 )
             )
+            # The compositor owns text placement. Describing reserved regions,
+            # percentages or panels to the photo model encourages a collage.
+            return reserve
         else:
             reserve += (
                 "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
@@ -2697,21 +2704,13 @@ def _background_image_prompt(project, *, size, scene_direction=None) -> str:
         values = getattr(scene_direction, field, None) or []
         if values:
             taste.append(f"{field}: " + ", ".join(_sanitize_visual_context(str(v)) for v in values))
-    placement = ""
-    if _premium_overlay_enabled(project):
-        overlay_copy = _menu_overlay_payload(project)
-        placement = (
-            "Keep the top ~28% and bottom ~14% naturally darker and calm. "
-            if not overlay_copy["items"] and not overlay_copy["shared_offer_price"] else
-            "Keep the top ~22% and bottom ~32% naturally darker and calm. "
-        )
     return (
         "Create a wordless decorative BACKGROUND photograph only.\n"
         f"Aspect ratio: {_aspect_ratio(size)}.\n"
         + (f"Photographic subjects (unlabeled): {subjects}.\n" if subjects else "")
         + ("Visual styling only: " + "; ".join(taste) + ".\n" if taste else "")
         + _poster_layout_requirements(project, force_background_only=True)
-        + "\n" + placement
+        + "\n"
         + "Use one continuous full-frame image; no hard horizontal boundaries, "
         "no blurred letterbox panels, and no empty menu band.\n"
         "Any attached reference is for imagery, palette and texture only. "

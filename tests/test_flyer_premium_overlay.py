@@ -632,9 +632,11 @@ def test_background_prompt_has_textsafe_zones_when_flag_on(monkeypatch):
     p = render._image_prompt(_bg_only_project(), concept_id="C1",
                              output_format="concept_preview", size=(1080, 1350))
     low = p.lower()
-    # The explicit safe-zone contract sentence must be present when the flag is on.
-    assert "top ~22%" in low and "bottom ~32%" in low
-    assert ("calm" in low or "uncluttered" in low)
+    # The compositor supplies contrast; the image stays a continuous photograph.
+    assert "continuous" in low and "single exposure" in low
+    assert "top ~" not in low and "bottom ~" not in low
+    assert "overlay panels" not in low and "reserved zones" not in low
+    assert "vignette" in low
     assert "hero" in low
 
 
@@ -967,3 +969,50 @@ def test_owned_logo_sha_survives_subprocess_result(tmp_path, monkeypatch):
     assert outcome.status == "premium_overlay_delivered"
     assert outcome.render_path == "subprocess"
     assert outcome.owned_logo_sha256 == "a" * 64
+
+def _sparse_buffet_project():
+    from schemas import FlyerLockedFact
+    project = _project6()
+    project.locked_facts = [f for f in project.locked_facts if not f.fact_id.startswith("item:")]
+    values = {"campaign_title": "Lunch Buffet", "pricing_structure": "$12.99 per person", "schedule": "Valid weekdays 11am to 2pm through November 30", "location": "123 Sample Rd Example City FL", "contact_phone": "+12025550142"}
+    for fact in project.locked_facts:
+        fact.value = values.get(fact.fact_id, fact.value)
+    project.locked_facts.append(FlyerLockedFact(fact_id="offer:0", label="Disclaimer", value="TEST ONLY - NOT A REAL OFFER", source="customer_text", required=True))
+    project.raw_request = "Lunch Buffet $12.99 per person. TEST ONLY - NOT A REAL OFFER"
+    return project
+
+
+@pytest.mark.parametrize("size", [(1080, 1350), (1080, 1080), (1080, 1920), (1275, 1650)])
+def test_sparse_offer_semantic_footer_and_price_hierarchy(tmp_path, monkeypatch, size):
+    project = _sparse_buffet_project()
+    calls = []
+    original = po._draw_centered
+    def record(draw, text, font, **kwargs):
+        box = draw.textbbox((0, kwargs["cy"]), text, font=font)
+        calls.append({"text": text, "px": font.size, "box": box, "fill": kwargs["fill"]})
+        return original(draw, text, font, **kwargs)
+    monkeypatch.setattr(po, "_draw_centered", record)
+    po.render_premium_overlay(project, _bg(tmp_path), tmp_path / "polished.png", size=size, output_format="concept_preview")
+    by_text = {call["text"]: call for call in calls}
+    for fid in ("schedule", "location", "contact_phone"):
+        value = next(f.value for f in project.locked_facts if f.fact_id == fid)
+        assert value in by_text, calls
+        assert by_text[value]["px"] >= int(size[0] * .027)
+    price = by_text["$12.99 per person"]
+    disclaimer = by_text["TEST ONLY - NOT A REAL OFFER"]
+    assert price["px"] >= int(size[0] * .033), calls
+    assert price["px"] > disclaimer["px"]
+    assert disclaimer["fill"] == po._CREAM_SOFT
+    assert disclaimer["box"][1] - price["box"][3] >= 8
+    assert all(c["box"][3] <= size[1] for c in calls)
+
+
+def test_sparse_offer_scrim_covers_price_without_darkening_hero(tmp_path):
+    from PIL import Image
+    background = tmp_path / "bright.png"
+    Image.new("RGB", (1080, 1350), (180, 180, 180)).save(background)
+    target = tmp_path / "contrast.png"
+    po.render_premium_overlay(_sparse_buffet_project(), background, target, size=(1080, 1350), output_format="concept_preview")
+    with Image.open(target) as result:
+        assert max(result.getpixel((80, 400))[:3]) < 145
+        assert result.getpixel((80, 700))[:3] == (180, 180, 180)

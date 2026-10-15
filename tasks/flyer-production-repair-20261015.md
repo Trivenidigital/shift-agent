@@ -73,9 +73,9 @@ User accepted the preceding focused repair approach and asked implementation to 
 - [x] Parallel root-cause reviews: intake/revisions; visual/QA; scope/reuse/approval.
 - [x] Add failing regressions for reproduced faults; implement bounded existing-path repairs.
 - [x] Verify representative briefs/revisions and inspect generated previews/four formats.
-- [ ] Independent scope/safety review; relevant Linux suite and governance/CI pass.
-- [ ] Canonical release and postdeploy service-account verification with rollback retained.
-- [ ] Report actual production evidence and any remaining human-only gates.
+- [x] Independent scope/safety review; relevant Linux suite and governance/CI pass.
+- [x] Canonical release and postdeploy service-account verification with rollback retained.
+- [x] Report actual production evidence and any remaining human-only gates.
 ## Repair evidence — October 15, in progress
 - Intake/revision regressions reproduced and repaired: grounded title and full schedule, exact secondary-copy strings/objects, whole-statement negation preservation, independent headline preservation, repeated-brief no-op and ambiguous scalar-time clarification. Latest focused group: 192 passed.
 - Visual regressions reproduced and repaired: duplicate pricing, conversational title fragments, buffet subject contradiction, sparse footer sizing, natural masthead word spacing. Actual generated images inspected, not just QA metadata.
@@ -135,3 +135,50 @@ After repair: pytest tests/test_amend_catering_lead.py -q → 55 passed in 3.97 
 - Rehearsal8 reused the real-model background from replay7 to isolate composition changes; fresh external OCR passed preview and all four exports again. No customer approval was fabricated, and no product message was sent.
 - Owned logos are now selected through existing customer/active/ownership rules and composited from verified bytes; templates remain style inputs. Unsupported paths and failures must enter manual review rather than silently drop identity. Actual painted-logo provenance is carried through the existing outcome/manifest and checked before final export.
 - F0229's account has no active owned logo; the active asset is a style template. Therefore its initials emblem is appropriate, and no inactive receipt/reference/logo is promoted to identity.
+
+## Released evidence — 2026-10-15 16:24 UTC
+- PR #802 merged: https://github.com/Trivenidigital/shift-agent/pull/802. Release SHA 35cd85ef8a64cea4600026d9ac757694e0d97009.
+- Canonical clean-clone full gate: 10,468 passed, 47 skipped in 791.97 seconds on aa946c70. Latest additional test passed in the 326-test focused batch. All eight latest-head CI checks passed. Independent final logo-integrity review: GO, 25 focused tests passed.
+- Merged release deployable tree is identical to the full-gate source (git diff aa946c70 origin/main -- src tools requirements-hermes-venv.txt empty). Canonical merged-SHA packaging reused that completed pytest gate and reran skills-manifest validation.
+- Artifact SHA256: bc9efb552f7cecdb4e9d5a6e8e1500f56d73bedf9041fc5abd741ec2bfa18aea; verified before extraction. Normal staging deploy completed: deploy-20261015-162126-35cd85ef. Prior rollback artifact retained: deploy-20261015-132910-a421a765.
+- Authorization: standing operator authorization for reviewed repair/PR/merge/deploy, as recorded above. No configuration/allowlist expansion. Hermes pin unchanged.
+- All deploy smoke checks passed; 76 runtime modules matched the artifact, 81 flat dependencies resolved. Separate service UID 999 checks under system Python and gateway venv verified all seven changed runtime files and module origins.
+- Receipt installed_at_utc 2026-10-15T16:21:27Z matches release. Gateway active/running, NRestarts=0; bridge connected, queueLength=0. Shutdown error lines in log are from the deployment restart; current health verified independently.
+- Installed-code isolated replay reused the previously generated real-model background/extraction response; fresh external OCR passed preview and WhatsApp image, Instagram post, Instagram story and printable PDF. This establishes deployed composition/export parity, not a second independent image-generation trial or actual handset approval/delivery.
+- Rehearsals used temporary state and copied assets with bridge sends blocked. No customer approval, quota or production project state was manufactured. F0229 remains unchanged; its old preview is not the repaired output and must not be approved as evidence of this release.
+- Readiness: repaired code deployed and verified for the existing operator-reviewed rollout. Broad unattended production readiness is not established: real handset approval/delivery and visual acceptance across representative customer briefs remain. Remaining sample polish includes background transitions and address wrapping. Existing approval/send/STOP/locked-fact gates remain mandatory.
+- Private logs and actual image: sibling directory postdeploy-replay.log, postdeploy-final-qa.json, postdeploy-health.log, postdeploy-imports.log, deployment-35cd85ef.log and F0229-deployed-preview.png. These contain private customer data and are not published to GitHub.
+## Visual polish follow-up — authorized October 15
+**Drift-check tag:** extends-Hermes
+**New primitives introduced:** none.
+
+### Hermes-first analysis
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| Image composition | Existing image model and render._background_image_prompt | Simplify current photographic instructions; no new generation pipeline |
+| Typography | Existing premium_overlay compositor and fact ledger | Separate footer fields and strengthen sparse-offer price hierarchy |
+| Approval and delivery | Existing cf-router/workflow | Verify actual human command; no new approval mechanism |
+In-tree matches cover the requested work; ecosystem substitution is unnecessary.
+
+### Capability Reuse Map — flyer-studio
+- Requested outcome: professional continuous photography, readable footer and price, exact WhatsApp approval instructions.
+- Affected projects: flyer-studio.
+- Applicable directives: universal v1.2.0, flyer-studio v1.0.0 (hashes above).
+- Existing platform/model capabilities reused: funded image generation and OCR.
+- Existing deterministic kernels reused: premium_overlay typography, fact ledger, visual QA, approval binding.
+- Existing stores/workflows reused: existing FlyerProject/concept/export workflow.
+- Thin adapters: prompt corrections and composition sizing only.
+- Custom runtime code genuinely unavoidable: bounded changes in existing modules.
+- New subsystem: none.
+- Evidence existing capabilities were insufficient: raw image itself contained horizontal photographic seams; concatenated footer wrapped inside street name; price was smaller than footer.
+- Architecture exception: none.
+- Shared-platform impact: none.
+- Other agents affected: none.
+- Vertical E2E proof: newly generated real-model background, actual preview/four exports inspected, deployed path verified; human performs genuine final approval/delivery test.
+
+Repo-meta reuse map above also covers this evidence record. Existing approval to fix visual polish and standing reviewed release authorization apply.
+- [ ] Repair prompt and sparse typography; targeted regression checks.
+- [ ] Generate fresh real-model image and inspect actual exports; independent visual review.
+- [ ] CI/release/deployment parity and exact human WhatsApp messages.
+
+Visual polish evidence: raw image confirmed model-painted seams; revised continuous-photo prompt generated a seamless fresh image. Sparse compositor now separates footer fields, strengthens price hierarchy, retains offer:0 test disclaimer in smaller cream type, and darkens the upper text region smoothly. Final focused overlay/export checks: 134 passed, 1 skipped. Prompt/render batch: 197 passed, plus reproduced/fixed category safeguard regression. No customer messages or production-state writes during model rehearsals.

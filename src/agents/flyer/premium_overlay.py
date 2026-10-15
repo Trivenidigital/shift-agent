@@ -665,19 +665,20 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # A sparse offer needs a footer scrim, not an empty menu-height panel.
         sparse_offer = not items and not shared_offer_price
         footer_px = max(min_px, int(width * (0.028 if sparse_offer else 0.0185)))
-        footer_text = "   |   ".join(p for p in (schedule, location, contact) if p)
+        footer_parts = [p for p in (schedule, location, contact) if p]
+        footer_blocks = footer_parts if sparse_offer else ["   |   ".join(footer_parts)]
         footer_measure = ImageDraw.Draw(img, "RGBA")
-        footer_lines = _wrap_premium(
-            footer_measure, footer_text, "footer", footer_px,
+        footer_lines = [line for block in footer_blocks for line in _wrap_premium(
+            footer_measure, block, "footer", footer_px,
             width - max(28, int(width * 0.05)) * 2,
-        ) if footer_text else []
+        )]
         footer_height = len(footer_lines) * int(footer_px * 1.35)
         bottom_frac = 0.40
         if sparse_offer:
             bottom_frac = min(0.40, (
                 footer_height + max(28, int(width * 0.05)) + height * 0.05
             ) / height)
-        img = compose_scrims(img, top_frac=0.22, bottom_frac=bottom_frac)
+        img = compose_scrims(img, top_frac=0.50 if sparse_offer else 0.22, bottom_frac=bottom_frac)
         draw = ImageDraw.Draw(img, "RGBA")
 
         margin = max(28, int(width * 0.05))
@@ -791,12 +792,9 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # FOOTER — schedule | location | contact (anchored to the bottom)
         # Drawn first so the menu/title/seal can use the space above it.
         # ===================================================================
-        footer_parts = [p for p in (schedule, location, contact) if p]
-        footer_text = "   |   ".join(footer_parts)
         footer_font = _premium_font("footer", footer_px)
         footer_y = height - margin
-        if footer_text:
-            footer_lines = _wrap_premium(draw, footer_text, "footer", footer_px, safe_w)
+        if footer_lines:
             footer_block_h = len(footer_lines) * int(footer_px * 1.35)
             footer_y = height - max(margin, int(height * 0.022)) - footer_block_h
             fy = footer_y
@@ -983,28 +981,33 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # in the same zone; secondary text is centred and typically short, so
         # visual overlap is rare and the editorial composition is preserved.
         # ===================================================================
-        secondary_y = title_bottom + max(6, int(height * 0.008))
-        sec_px = max(min_px, int(width * 0.020))
+        secondary_y = title_bottom + max(6, int(height * (0.018 if sparse_offer else 0.008)))
+        sec_px = max(min_px, int(width * (0.023 if sparse_offer else 0.020)))
         sec_font = _premium_font("footer", sec_px)
         sec_line_h = int(sec_px * 1.4)
 
-        def _draw_secondary(text, *, fill) -> bool:
+        def _draw_secondary(text, *, fill, prominent=False) -> bool:
             """Draw a centred secondary block ONLY if the whole wrapped block fits
             the band between title_bottom and menu_top; returns True (and inks it)
             if drawn, else False with no pixels mutated."""
             nonlocal secondary_y
             if not text:
                 return False
-            lines = _wrap_premium(draw, text, "footer", sec_px, safe_w)
+            block_px = max(min_px, int(width * 0.034)) if sparse_offer and prominent else sec_px
+            block_font = _premium_font("footer", block_px) if block_px != sec_px else sec_font
+            line_h = int(block_px * 1.4) if block_px != sec_px else sec_line_h
+            lines = _wrap_premium(draw, text, "footer", block_px, safe_w)
             if not lines:
                 return False
-            block_h = len(lines) * sec_line_h
+            block_h = len(lines) * line_h
             if secondary_y + block_h > menu_top:
                 return False  # whole block does not fit → draw nothing (no partial)
             for ln in lines:
-                _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
+                _draw_centered(draw, ln, block_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
                 _ink(ln)
-                secondary_y += sec_line_h
+                secondary_y += line_h
+            if sparse_offer:
+                secondary_y += max(8, int(height * 0.006))
             return True
 
         # Required facts not yet covered by a region above get drawn here as
@@ -1033,7 +1036,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             # allow the secondary to handle it so the offer stays covered.
             if is_offer and seal_drawn:
                 continue  # seal already covers this; do NOT double-draw
-            _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
+            # offer:* also carries customer disclaimers. Only a price role gets
+            # the sparse layout's larger gold treatment; preserve its full copy.
+            prominent_price = sparse_offer and fid in {"pricing_structure", "offer_price"}
+            gold_copy = prominent_price if sparse_offer else is_offer
+            _draw_secondary(value, fill=_GOLD if gold_copy else _CREAM_SOFT, prominent=prominent_price)
 
         # Best-effort optional extras: assembly detail clauses that are NOT required
         # locked facts (e.g. the raw-request echo).  POLISH: suppress any extra that

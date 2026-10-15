@@ -79,5 +79,9 @@ def test_sparse_offer_prompt_does_not_reserve_empty_menu_band(monkeypatch):
     prompt = render._image_prompt(project(), concept_id="C1", output_format="concept_preview",
                                   size=(1080, 1350), force_background_only=True).lower()
     assert "bottom ~32%" not in prompt
-    assert "bottom ~14%" in prompt
+    assert "top ~" not in prompt
+    assert "bottom ~" not in prompt
+    assert "reserved overlay zones" not in prompt
+    assert "overlay panels" not in prompt
+    assert "single exposure" in prompt
     assert "no blurred letterbox panels" in prompt
