@@ -50,6 +50,12 @@ import catering_quote_ledger as ql  # noqa: E402
 NOW = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class _FixtureDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+
 def _ids():
     """Owner/group for the sidecar filesystem contract. The tmp dir and every file
     under it are created by THIS process, so the running uid/gid match."""
@@ -144,6 +150,10 @@ def sb(tmp_path, monkeypatch):
 
 def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None,
          bridge_status="connect_failed"):
+    # Captured amendments use NOW; date extraction must share that fixture
+    # clock. Set per invocation because one test undoes its poisoned extractor
+    # between calls, which also undoes fixture monkeypatches.
+    sb.monkeypatch.setattr(cx, "datetime", _FixtureDateTime)
     mod = load_script("amend_lead_under_test", SCRIPTS / "amend-catering-lead")
     mod.CONFIG_PATH = sb.config
     mod.LEADS_PATH = sb.leads

@@ -91,3 +91,40 @@ User accepted the preceding focused repair approach and asked implementation to 
 - Remaining visual polish: hard background transitions and address wrap; no clipping or missing required copy in inspected outputs. Raw brief did not specify cuisine. Structured scene cuisine is now preserved when supplied, without inferring it from business name.
 - Export protection now binds selected preview and raw background hashes to existing manifest/project/version/concept. Legacy source-edit previews lacking that binding must be regenerated before final export.
 - Public regression fixtures use a synthetic address and phone; private runtime artifacts remain outside the repository.
+# Catering amendment test clock repair
+
+Universal directive: docs/governance/engineering-directive.md v1.2.0 blob 31d7706d42b5a9477ce236f4dcb3841223b74a6f
+Project registry: docs/governance/project-registry.yaml v1.0.0 blob 207ad4183e4b0fd37b74eeec29e7dc215546c4cd
+Affected project: catering-studio (explicit tests/test_amend_catering_lead.py mapping, registry line154).
+Applicable directive: docs/governance/projects/catering-studio.md v1.0.0 blob 858bd9f29d591e023b895ff5cbd2f3804f146ead.
+Shared directive reference: v1.1.0 blob 9c6ce25607d59ac3dc3918ab4c908c77a65bde5f.
+Shared-platform impact: none; test-only clock injection.
+New subsystem: no. Architecture exception: none.
+
+## Capability Reuse Map — catering-studio
+
+- Requested outcome: amendment tests remain deterministic after October 12.
+- Affected projects: catering-studio.
+- Applicable directives: docs/governance/engineering-directive.md, docs/governance/projects/catering-studio.md; shared guidance retained.
+- Existing platform/model capabilities reused: none changed.
+- Existing deterministic kernels reused: unchanged catering_extraction date parser.
+- Existing stores/workflows reused: existing Sandbox and _run test harness.
+- Thin adapters: test-only datetime subclass returns existing NOW fixture timestamp.
+- Custom runtime code genuinely unavoidable: none.
+- New subsystem: none.
+- Evidence existing capabilities were insufficient: harness captured amendments at fixed August 1 but parsed yearless dates against wall clock.
+- Architecture exception: none.
+- Shared-platform impact: no production changes.
+- Other agents affected: none.
+- Vertical E2E proof: full amend-catering-lead test module exercises script with its existing sandbox, send stubs, and canonical parser.
+
+## Baseline evidence
+
+Exported origin/main a421a7656f314ca16e6281f9a81ea38cde1cba8e via git archive to sibling amend-baseline.tar. Ran its unmodified tests in disposable Docker, network disabled. Both selected tests failed: expected 2026-10-12, actual 2027-10-12. This is baseline date rollover, not a Flyer regression.
+
+Baseline command: pytest tests/test_amend_catering_lead.py -k 'moves_date_and_service_style or later_amendment_still_applies' -q. Result: 2 failed, 53 deselected.
+
+Repair changes only tests/test_amend_catering_lead.py. The per-invocation clock patch survives the existing test's deliberate monkeypatch.undo by being reapplied on the next script invocation. Production parsing and expected business behavior are unchanged.
+
+After repair: pytest tests/test_amend_catering_lead.py -q → 55 passed in 3.97 seconds, Docker network disabled.
+
