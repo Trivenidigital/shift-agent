@@ -265,3 +265,5 @@
 - 2026-08-03 An independent author needs enforceable information separation, not a different prompt. The stage tree being untracked in git made worktree isolation genuinely enforceable; verify separation after the fact (id and normalized-body collisions against every prior round) rather than assuming it.
 
 - 2026-10-15 A generated/sent preview with zero QA warnings is not a passed product test. Inspect the actual artifact against the original request. Never approve a known-defective flyer merely to clear a workflow; preserve it as regression evidence and use supported cancel/new-project paths. Trace structured brief, prompt, revision and QA before attributing failure to the image model.
+
+- 2026-10-15 Visual acceptance is separate from OCR correctness. Visible photographic seams and weak offer hierarchy remain release work when the user requests professional output; inspect raw art to distinguish model composition defects from deterministic overlay defects.
