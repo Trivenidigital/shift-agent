@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -53,10 +54,15 @@ _SYSTEM_PROMPT = (
     "Extract flyer facts from the customer brief. Return ONLY JSON: "
     '{"business_name":str|null,"campaign_title":str|null,"pricing_structure":str|null,'
     '"schedule":str|null,"location":str|null,"contact_phone":str|null,'
-    '"items":[{"name":str,"price":str|null}]}. '
+    '"items":[{"name":str,"price":str|null}],"offers":[{"text":str}]}. '
     "Rules: copy values VERBATIM from the brief text; every menu/product item goes in "
     "items; pricing_structure is the offer/price statement; never invent or infer "
     "anything absent from the text. "
+    "campaign_title is the short offering/event phrase from the brief (for example Lunch Buffet), "
+    "not a greeting, request instruction, or business identity. Preserve the complete days/time range in schedule. "
+    "offers contains additional customer-visible copy, restrictions and disclaimers verbatim, including "
+    "test/not-a-real-offer labels when supplied. Do not duplicate pricing_structure in offers. "
+    "For offers, preserve the whole supplied sentence or clause, including all negations and conditions. "
     'Additionally return "occasion": one of "july4","diwali","ramadan","thanksgiving" '
     "ONLY when the brief EXPLICITLY names that holiday/festival; generic festive words "
     '(celebration, special, sale, seasonal) are NOT occasions; when unsure return "none". '
@@ -199,6 +205,34 @@ def extract_text_facts_v2(fields, raw_request: str, *, message_id: str = "",
             facts.append(_fact(f"item:{n}:price", price))
         n += 1
 
+    raw_offers = doc.get("offers") or []
+    if not isinstance(raw_offers, list):
+        raise ExtractionV2Error("offers must be an array")
+    # Secondary copy must preserve a whole supplied statement. Substring
+    # grounding would turn 'Not valid on weekends' into 'valid on weekends'.
+    # This validates model-selected copy; it does not infer facts from prose.
+    def normalize_copy(text: str) -> str:
+        return " ".join(text.casefold().split()).strip(" .!?;:")
+    source_statements = {normalize_copy(part) for part in re.split(r"(?<=[.!?;:])\s+|\n+", raw)}
+    for offer in raw_offers:
+        # Match semantic_brief's existing coercion contract: providers may
+        # return either verbatim strings or objects carrying a text value.
+        if isinstance(offer, str):
+            value = offer.strip()
+        elif isinstance(offer, dict):
+            value = str(offer.get("text") or "").strip()
+        else:
+            continue
+        if not value or any(f.value == value for f in facts):
+            continue
+        # Secondary copy can contain negation/restrictions. Token membership
+        # alone would permit reordering those into the opposite claim.
+        if value_has_source_parity(value, brief_lower) and normalize_copy(value) in source_statements:
+            index = sum(f.fact_id.startswith("offer:") for f in facts)
+            facts.append(_fact(f"offer:{index}", value).model_copy(update={"source_message_id": message_id}))
+            report.scalars_locked += 1
+        else:
+            report.dropped_by_parity.append(f"offer={value[:60]}")
     return facts, report
 
 

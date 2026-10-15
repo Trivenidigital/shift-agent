@@ -640,7 +640,22 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             img = bg.convert("RGB")
             if img.size != size:
                 img = img.resize(size)
-        img = compose_scrims(img, top_frac=0.22, bottom_frac=0.40)
+        # A sparse offer needs a footer scrim, not an empty menu-height panel.
+        sparse_offer = not items and not shared_offer_price
+        footer_px = max(min_px, int(width * (0.028 if sparse_offer else 0.0185)))
+        footer_text = "   |   ".join(p for p in (schedule, location, contact) if p)
+        footer_measure = ImageDraw.Draw(img, "RGBA")
+        footer_lines = _wrap_premium(
+            footer_measure, footer_text, "footer", footer_px,
+            width - max(28, int(width * 0.05)) * 2,
+        ) if footer_text else []
+        footer_height = len(footer_lines) * int(footer_px * 1.35)
+        bottom_frac = 0.40
+        if sparse_offer:
+            bottom_frac = min(0.40, (
+                footer_height + max(28, int(width * 0.05)) + height * 0.05
+            ) / height)
+        img = compose_scrims(img, top_frac=0.22, bottom_frac=bottom_frac)
         draw = ImageDraw.Draw(img, "RGBA")
 
         margin = max(28, int(width * 0.05))
@@ -680,16 +695,15 @@ def render_premium_overlay(project, source, target, *, size, output_format):
                            cy=mono_cy, width=width,
                            fill=_EMBLEM_GOLD, shadow=None)
 
-        # Brand name: letter-spaced small-caps below the ring.
+        # Brand name: natural word spacing survives the word-wrap routine.
+        # Tracking every character with thin spaces makes split()/join() erase
+        # the distinction between letter spacing and the actual business words.
         y = ring_bot + max(10, int(height * 0.010))
         if business:
-            brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
+            brand_px   = max(min_px, int(width * 0.039))
             brand_font = _premium_font("masthead", brand_px)
             brand_text = _spaced_caps(business)
-            # Inline letter-spacing: interleave extra thin spaces between characters
-            # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
-            brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
-            brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
+            brand_lines  = _wrap_premium(draw, brand_text, "masthead", brand_px, safe_w)
             for ln in brand_lines:
                 _draw_centered(draw, ln, brand_font,
                                cy=y, width=width,
@@ -746,7 +760,6 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # FOOTER — schedule | location | contact (anchored to the bottom)
         # Drawn first so the menu/title/seal can use the space above it.
         # ===================================================================
-        footer_px = max(min_px, int(width * 0.0185))
         footer_parts = [p for p in (schedule, location, contact) if p]
         footer_text = "   |   ".join(footer_parts)
         footer_font = _premium_font("footer", footer_px)

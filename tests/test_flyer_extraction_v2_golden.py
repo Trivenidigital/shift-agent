@@ -37,6 +37,37 @@ def _run_fixture(bid):
     return meta, facts, report
 
 
+@pytest.mark.parametrize("string_offers", [False, True])
+def test_secondary_copy_preserves_disclaimer_and_rejects_changed_restrictions(string_offers):
+    raw = "Lunch Buffet $12.99 per person. TEST ONLY - NOT A REAL OFFER. Not valid on weekends."
+    offer_values = ["TEST ONLY - NOT A REAL OFFER", "Not valid on weekends",
+                    "weekends valid on Not", "Free delivery", "Lunch Buffet $12.99 per person"]
+    facts, report = extract_text_facts_v2(FlyerRequestFields(), raw,
+        message_id="synthetic-disclaimer",
+        transport=lambda *_: json.dumps({
+            "pricing_structure": "Lunch Buffet $12.99 per person",
+            "offers": offer_values if string_offers else [{"text": value} for value in offer_values],
+        }))
+    offers = [f for f in facts if f.fact_id.startswith("offer:")]
+    assert [f.value for f in offers] == ["TEST ONLY - NOT A REAL OFFER", "Not valid on weekends"]
+    assert all(f.required for f in offers)
+    assert len(report.dropped_by_parity) == 2
+
+
+def test_secondary_copy_container_must_be_an_array():
+    with pytest.raises(ExtractionV2Error, match="offers must be an array"):
+        extract_text_facts_v2(FlyerRequestFields(), "TEST ONLY",
+            transport=lambda *_: json.dumps({"offers": "TEST ONLY"}))
+
+
+def test_secondary_copy_cannot_drop_negation_from_source_clause():
+    facts, report = extract_text_facts_v2(FlyerRequestFields(),
+        "Not valid on weekends. TEST ONLY - NOT A REAL OFFER",
+        transport=lambda *_: json.dumps({"offers": ["valid on weekends", "A REAL OFFER"]}))
+    assert not facts
+    assert len(report.dropped_by_parity) == 2
+
+
 @pytest.mark.parametrize("bid", sorted(FIXTURES))
 def test_golden_truth_parity(bid):
     meta, facts, report = _run_fixture(bid)

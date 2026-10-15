@@ -1127,6 +1127,43 @@ def _near_duplicate_item_blockers(project: FlyerProject, raw_text: str) -> list[
     return blockers
 
 
+def _visible_copy_blockers(project: FlyerProject, raw_text: str) -> list[str]:
+    """Reject request fragments and repeated full offers on every render path.
+
+    Whole-line matching retains numbers and qualifiers. Text explicitly declared
+    in another role can legitimately repeat; an Offer label is not another role.
+    """
+    def normalized(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    declared = {normalized(str(f.value or "")) for f in project.locked_facts}
+    fragment = re.compile(
+        r"(?:(?:hi|hello)\s+)?(?:i\s+(?:need|want|would\s+like)|"
+        r"(?:please\s+)?(?:create|make|generate|design))"
+        r"(?:\s+(?:a|an|new|flyer|flier|poster|banner|for|me))*",
+        re.IGNORECASE,
+    )
+    blockers = [f"request fragment visible: {line}" for line in lines
+                if normalized(line) not in declared and fragment.fullmatch(normalized(line))]
+    offer_ids = {f.fact_id for f in project.locked_facts
+                 if f.fact_id == "pricing_structure" or f.fact_id.startswith("offer:")}
+    other_values = {normalized(str(f.value or "")) for f in project.locked_facts
+                    if f.fact_id not in offer_ids}
+    offer_lines = [normalized(re.sub(r"^(?:offer|pricing)\s*:\s*", "", line,
+                                    flags=re.IGNORECASE)) for line in lines]
+    seen = set()
+    for fact in project.locked_facts:
+        value = str(fact.value or "").strip()
+        norm = normalized(value)
+        if fact.fact_id not in offer_ids or not norm or norm in seen or norm in other_values:
+            continue
+        seen.add(norm)
+        if offer_lines.count(norm) > 1:
+            blockers.append(f"duplicate offer visible: {value}")
+    return blockers
+
+
 def _duplicate_headline_blockers(project: FlyerProject, raw_text: str, *, artifact_path) -> list[str]:
     """Enforce the rendered typeset contract using exact OCR lines, not substrings.
 
@@ -2155,6 +2192,7 @@ def run_visual_qa(
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
     blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
+    blockers.extend(_visible_copy_blockers(project, extracted_text))
     blockers.extend(_duplicate_headline_blockers(project, extracted_text, artifact_path=artifact_path))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
     blockers.extend(_fabricated_offer_price_blockers(project, extracted_text))

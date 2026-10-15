@@ -926,7 +926,7 @@ def test_exact_dessert_graduation_long_menu_renders_integrated_catalog_and_final
             source="rendered",
             path=str(preview.path),
             mime_type="image/png",
-            sha256="a" * 64,
+            sha256=hashlib.sha256(preview.path.read_bytes()).hexdigest(),
             original_message_id=project.original_message_id,
             received_at=project.created_at,
         )],
@@ -1167,7 +1167,7 @@ def test_background_only_final_package_reapplies_overlay_per_format(tmp_path, mo
     preview_path = specs[0].path
     asset = FlyerAsset(
         asset_id="A0001", kind="concept_preview", source="rendered", path=str(preview_path),
-        mime_type="image/png", sha256="c" * 64, original_message_id="m1",
+        mime_type="image/png", sha256=hashlib.sha256(preview_path.read_bytes()).hexdigest(), original_message_id="m1",
         received_at=datetime.now(timezone.utc),
     )
     selected = project.model_copy(update={
@@ -1210,7 +1210,7 @@ def test_background_only_final_honors_edited_preview_over_stale_raw(tmp_path, mo
     os.utime(approved, (new, new))
     project = _complete_project().model_copy(update={
         "assets": [FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
-                              path=str(approved), mime_type="image/png", sha256="a" * 64,
+                              path=str(approved), mime_type="image/png", sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
                               original_message_id="m1", received_at=datetime.now(timezone.utc))],
         "concepts": [FlyerConcept(concept_id="C1", title="Best", style_summary="g",
                                   preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc))],
@@ -1621,7 +1621,7 @@ def test_menu_overlay_fits_many_item_final_formats(tmp_path, monkeypatch):
             source="rendered",
             path=str(preview.path),
             mime_type="image/png",
-            sha256="a" * 64,
+            sha256=hashlib.sha256(preview.path.read_bytes()).hexdigest(),
             original_message_id="m-eight-items",
             received_at=now,
         )],
@@ -2987,6 +2987,17 @@ def test_source_edit_preview_applies_deterministic_overlay(tmp_path, monkeypatch
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
     assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
     assert manifest["expected_facts"], "source-edit manifest must declare the overlaid facts, not empty"
+    raw_path = render_module._raw_background_path(spec.path)
+    assert manifest["source_sha256"] == hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    assert manifest["source_sha256"] != hashlib.sha256(reference.read_bytes()).hexdigest()
+    preview_asset = build_asset_manifest([spec], first_asset_number=2, source="rendered",
+                                         original_message_id="synthetic-approved-edit")[0]
+    selected = project.model_copy(update={
+        "assets": [*project.assets, preview_asset], "selected_concept_id": "C1",
+        "concepts": [FlyerConcept(concept_id="C1", title="Edited", style_summary="Source edit",
+            preview_asset_id=preview_asset.asset_id, created_at=datetime.now(timezone.utc))],
+    })
+    assert len(render_final_package(selected, tmp_path / "bound-finals")) == 4
 
 
 def test_source_edit_integrity_manifest_allows_long_edit_instruction(tmp_path, monkeypatch):
@@ -3950,7 +3961,7 @@ def test_non_eligible_final_package_uses_preview_directly_not_raw(tmp_path, monk
                 source="rendered",
                 path=str(approved),
                 mime_type="image/png",
-                sha256="a" * 64,
+                sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
                 original_message_id="wamid.flyer.1",
                 received_at=datetime.now(timezone.utc),
             ),
@@ -4005,7 +4016,7 @@ def test_source_edit_final_package_reapplies_overlay_per_format(tmp_path, monkey
         "assets": [
             FlyerAsset(
                 asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
-                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                mime_type="image/png", sha256=hashlib.sha256(approved.read_bytes()).hexdigest(), original_message_id="wamid.flyer.1",
                 received_at=datetime.now(timezone.utc),
             ),
             FlyerAsset(
@@ -4031,6 +4042,8 @@ def test_source_edit_final_package_reapplies_overlay_per_format(tmp_path, monkey
 
     monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
 
+    render_module.write_text_manifest(project, approved, output_format="concept_preview",
+                                      selected_concept_id="C1", source_path=raw_bg)
     render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
 
     formats_overlaid = {c["output_format"] for c in overlay_calls}
@@ -4061,7 +4074,7 @@ def test_source_edit_final_package_ignores_stale_raw_guard_and_reapplies_overlay
         "assets": [
             FlyerAsset(
                 asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
-                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                mime_type="image/png", sha256=hashlib.sha256(approved.read_bytes()).hexdigest(), original_message_id="wamid.flyer.1",
                 received_at=datetime.now(timezone.utc),
             ),
             FlyerAsset(
@@ -4094,6 +4107,8 @@ def test_source_edit_final_package_ignores_stale_raw_guard_and_reapplies_overlay
     monkeypatch.setattr(render_module, "_export_from_source_image_contained", _record_contained)
     monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
 
+    render_module.write_text_manifest(project, approved, output_format="concept_preview",
+                                      selected_concept_id="C1", source_path=raw_bg)
     render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
 
     formats_overlaid = {c["output_format"] for c in overlay_calls}
@@ -4142,7 +4157,7 @@ def test_not_background_eligible_source_edit_final_still_reapplies_overlay(tmp_p
         "assets": [
             FlyerAsset(
                 asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
-                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                mime_type="image/png", sha256=hashlib.sha256(approved.read_bytes()).hexdigest(), original_message_id="wamid.flyer.1",
                 received_at=datetime.now(timezone.utc),
             ),
             FlyerAsset(
@@ -4167,6 +4182,8 @@ def test_not_background_eligible_source_edit_final_still_reapplies_overlay(tmp_p
         Path(target).write_bytes(Path(source).read_bytes())
 
     monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
+    render_module.write_text_manifest(project, approved, output_format="concept_preview",
+                                      selected_concept_id="C1", source_path=raw_bg)
     render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
 
     assert {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"} <= set(overlay_calls), (
@@ -4304,7 +4321,7 @@ def test_final_package_reuses_selected_concept_with_deterministic_model(tmp_path
         source="rendered",
         path=str(approved),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4369,7 +4386,7 @@ def test_final_package_with_selected_concept_invalid_preview_fails_closed(tmp_pa
         source="rendered",
         path=str(invalid_preview),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(invalid_preview.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4420,7 +4437,7 @@ def test_source_edit_final_package_without_raw_sidecar_fails_closed(tmp_path, mo
         source="rendered",
         path=str(approved),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4457,7 +4474,7 @@ def test_manual_completed_source_edit_final_package_uses_operator_preview_withou
         source="uploaded",
         path=str(approved),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4508,7 +4525,7 @@ def test_manual_completed_source_edit_requires_selected_operator_asset_id_for_ra
         source="uploaded",
         path=str(approved),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4553,7 +4570,7 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
         source="rendered",
         path=str(approved),
         mime_type="image/png",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
         original_message_id="wamid.flyer.1",
         received_at=datetime.now(timezone.utc),
     )
@@ -4575,6 +4592,8 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
         "selected_concept_id": "C1",
     })
 
+    render_module.write_text_manifest(project, approved, output_format="concept_preview",
+                                      selected_concept_id="C1", source_path=raw_bg)
     specs = render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
 
     whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")

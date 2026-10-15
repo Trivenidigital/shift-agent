@@ -17,12 +17,13 @@ BOTTOM-RIGHT. Cover-crop removes both (top/bottom bands); letterbox keeps both.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 
 import pytest
 
 pytest.importorskip("PIL")
 
-from agents.flyer.render import render_final_package
+from agents.flyer.render import FlyerRenderError, render_final_package
 from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields
 
 RED = (220, 30, 30)
@@ -73,13 +74,57 @@ def _rawless_project(tmp_path, monkeypatch):
         locked_facts=[_F("business_name", "Lakshmi's Kitchen"),
                       _F("contact_phone", "+15550100001")],
         assets=[FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
-                           path=str(preview), mime_type="image/png", sha256="a" * 64,
+                           path=str(preview), mime_type="image/png", sha256=hashlib.sha256(preview.read_bytes()).hexdigest(),
                            original_message_id="m-ws2b", received_at=now)],
         concepts=[FlyerConcept(concept_id="C1", title="Best Design",
                                style_summary="v2 integrated render", preview_asset_id="A0001",
                                prompt="", created_at=now)],
         selected_concept_id="C1",
     )
+
+
+def test_replaced_selected_preview_refuses_before_any_final_export(tmp_path, monkeypatch):
+    from PIL import Image
+
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    with Image.open(preview) as image:
+        image.putpixel((100, 100), (0, 255, 0))
+        image.save(preview)
+    final_dir = tmp_path / "finals"
+    with pytest.raises(FlyerRenderError, match="preview.*hash mismatch"):
+        render_final_package(project, final_dir)
+    assert not final_dir.exists() or not list(final_dir.iterdir())
+
+
+@pytest.mark.parametrize("broken_binding", ["raw_changed", "manifest_missing", "preview_hash", "version"])
+def test_raw_recomposition_requires_preview_bound_source(tmp_path, monkeypatch, broken_binding):
+    import json
+    from agents.flyer import render
+    from PIL import Image
+
+    project = _rawless_project(tmp_path, monkeypatch)
+    preview = tmp_path / "F9401-C1-preview.png"
+    raw = preview.with_name(f"{preview.stem}.raw.png")
+    _pinned_preview(raw)
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _: True)
+    render.write_text_manifest(project, preview, output_format="concept_preview",
+                               selected_concept_id="C1", source_path=raw)
+    sidecar = render._text_manifest_path(preview)
+    if broken_binding == "raw_changed":
+        with Image.open(raw) as image:
+            image.putpixel((100, 100), (0, 255, 0))
+            image.save(raw)
+    elif broken_binding == "manifest_missing":
+        sidecar.unlink()
+    else:
+        manifest = json.loads(sidecar.read_text())
+        manifest["artifact_sha256" if broken_binding == "preview_hash" else "project_version"] = "wrong"
+        sidecar.write_text(json.dumps(manifest))
+    final_dir = tmp_path / "finals"
+    with pytest.raises(FlyerRenderError, match="raw background binding"):
+        render_final_package(project, final_dir)
+    assert not final_dir.exists() or not list(final_dir.iterdir())
 
 
 def test_rawless_fixed_formats_letterbox_never_crop(tmp_path, monkeypatch):

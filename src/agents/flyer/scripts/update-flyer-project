@@ -255,6 +255,7 @@ def _sync_render_field_locked_facts(project, field_updates: dict[str, str], *, m
     mapping = {
         "contact_info": ("contact_phone", "Contact"),
         "venue_or_location": ("location", "Location"),
+        "event_or_business_name": ("campaign_title", "Campaign"),
     }
     desired = {
         fact_id: (label, " ".join(str(field_updates[field]).strip(" .,:;").split()))
@@ -263,6 +264,11 @@ def _sync_render_field_locked_facts(project, field_updates: dict[str, str], *, m
     }
     if not desired:
         return list(getattr(project, "locked_facts", []) or [])
+    old_title = next((str(f.value) for f in project.locked_facts if f.fact_id == "campaign_title"), "")
+    old_headline = next((str(f.value) for f in project.locked_facts if f.fact_id == "headline"), "")
+    if ("campaign_title" in desired and old_headline
+            and (not old_title or _normalized_text(old_title) == _normalized_text(old_headline))):
+        desired["headline"] = ("Headline", desired["campaign_title"][1])
 
     updated = []
     seen: set[str] = set()
@@ -271,6 +277,8 @@ def _sync_render_field_locked_facts(project, field_updates: dict[str, str], *, m
         if target is None:
             updated.append(fact)
             continue
+        if fact.fact_id in {"campaign_title", "headline"} and fact.source not in _REVISABLE_SOURCES:
+            raise SystemExit("title is locked by another source")
         label, value = target
         updated.append(fact.model_copy(update={
             "label": label,

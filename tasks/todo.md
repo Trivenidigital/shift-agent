@@ -2143,3 +2143,6 @@ Plan + evidence: [catering-flyer-readiness-20261008.md](catering-flyer-readiness
 - [ ] Independent reviews (authorization/pricing; runtime/deployment) of commit bbf07048
 - [ ] Push, PR, CI, canonical tarball, deploy, receipt + service-account verification
 - [ ] P2 genuine flyer journey from +19802005023 (CUST0005); P3 genuine catering journey; P4 monitoring/rollback
+
+## Flyer production repair — 2026-10-15
+User authorized focused repair after F0229 visual failure. Plan: tasks/flyer-production-repair-20261015.md. Source+runtime a421a765, isolated branch codex/flyer-production-repair-20261015. Gates: reproduce, repair existingpaths, visually validate realmodel output, review, CI, canonicaldeploy, true customerjourney proof.

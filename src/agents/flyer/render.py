@@ -768,6 +768,12 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
         if is_menu_item_aggregate(value):
             return
         normalized = _normalize_fact_text(value)
+        # A labeled raw-input echo is not a second offer. Only collapse it
+        # when the entire value after the label equals copy already retained;
+        # distinct offers sharing the same price must remain distinct.
+        labeled = re.match(r"^(?:offer|pricing)\s*:\s*(.+)$", value, re.IGNORECASE)
+        if labeled and _normalize_fact_text(labeled.group(1)) in seen:
+            return
         if normalized in seen:
             return
         seen.add(normalized)
@@ -1080,6 +1086,8 @@ def _same_text(left: str, right: str) -> bool:
 
 
 _INSTRUCTION_TITLE_TOKENS = {
+    "i", "we", "a", "an", "the", "me", "us", "you", "can", "could", "would",
+    "want", "like", "to", "hi", "hello",
     "create",
     "make",
     "generate",
@@ -1525,7 +1533,21 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                 _hero_name = (_cd.get("hero_name") or "").strip()
                 _theme_family = (_cd.get("theme_family") or "").strip()
                 _mood = (_cd.get("mood") or "").strip()
-            if _hero_name or _theme_family or _mood:
+            # A buffet is the advertised offering, not a single menu dish.
+            # Use already-resolved copy to avoid contradicting the brief with
+            # the legacy single-dish/no-buffet background direction.
+            _buffet_offer = bool(re.search(
+                r"\bbuffet\b", " ".join([plan.title, *plan.detail_lines]), re.IGNORECASE
+            ))
+            if _buffet_offer:
+                _hero_line = (
+                    "- Compose a wordless buffet photograph matching the advertised buffet: "
+                    "a coherent appetizing buffet presentation with warm cinematic lighting "
+                    "and natural food texture. Let the food dominate the frame. "
+                    "Do not portray a single plated dish as the whole buffet or imply "
+                    "specific included menu items that the brief does not confirm.\n"
+                )
+            elif _hero_name or _theme_family or _mood:
                 # CD-v2 observability (census D10): the resolved carrier is now
                 # shaping this prompt — mark the render's outcome consumed.
                 _cdv2_out = _CREATIVE_DIRECTION_V2_OUTCOME.get()
@@ -1561,8 +1583,10 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                     "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
                     "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
                     "do NOT leave empty flat bands or blank panels.\n"
-                    "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
-                    "separate dishes — ONE hero dish is the subject.\n"
+                    + ("- No people, no faces, no hands, no diners; the buffet is the subject.\n"
+                       if _buffet_offer else
+                       "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+                       "separate dishes — ONE hero dish is the subject.\n")
                 )
             )
         else:
@@ -2301,6 +2325,10 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _generation_brand_assets(project)
     refs = _project_reference_assets(project)
+    if (_background_only_eligible(project) or force_background_only) and _premium_overlay_enabled(project):
+        # Logo/template identity is composited later; supplying it here invites
+        # the background model to paint another masthead. Keep user imagery.
+        brand_assets = []
     if _style_only_reference_requested(project):
         # Style-only means "do not copy source branding/text", not "hide the
         # reference from the art director." The prompt and QA already enforce
@@ -2634,7 +2662,47 @@ def _resolve_style_directives(project: FlyerProject) -> tuple[str, str, str]:
     return register_block, typeset_section, ban_line
 
 
+def _background_image_prompt(project, *, size, scene_direction=None) -> str:
+    """Imagery-only view of the existing overlay contract, without poster copy."""
+    plan = _poster_copy_plan(project)
+    subjects = ", ".join(_sanitize_visual_context(name) for name, _price in plan.items)
+    # Keep structured art-direction taste, not its full-poster scene or raw
+    # customer/revision prose (which can contain instructions to paint text).
+    taste = []
+    theme = _sanitize_visual_context(str(getattr(scene_direction, "theme_family", "") or ""))
+    if theme:
+        taste.append("unlabeled imagery theme: " + theme)
+    for field in ("visual_subjects", "palette", "motifs"):
+        values = getattr(scene_direction, field, None) or []
+        if values:
+            taste.append(f"{field}: " + ", ".join(_sanitize_visual_context(str(v)) for v in values))
+    placement = ""
+    if _premium_overlay_enabled(project):
+        overlay_copy = _menu_overlay_payload(project)
+        placement = (
+            "Keep the top ~28% and bottom ~14% naturally darker and calm. "
+            if not overlay_copy["items"] and not overlay_copy["shared_offer_price"] else
+            "Keep the top ~22% and bottom ~32% naturally darker and calm. "
+        )
+    return (
+        "Create a wordless decorative BACKGROUND photograph only.\n"
+        f"Aspect ratio: {_aspect_ratio(size)}.\n"
+        + (f"Photographic subjects (unlabeled): {subjects}.\n" if subjects else "")
+        + ("Visual styling only: " + "; ".join(taste) + ".\n" if taste else "")
+        + _poster_layout_requirements(project, force_background_only=True)
+        + "\n" + placement
+        + "Use one continuous full-frame image; no hard horizontal boundaries, "
+        "no blurred letterbox panels, and no empty menu band.\n"
+        "Any attached reference is for imagery, palette and texture only. "
+        "Do not reproduce its lettering, logo, signage or layout panels. "
+        "Do not draw words, letters, numbers, logos, watermarks, prices or contact details. "
+        "All identity and customer copy will be composited separately.\n"
+    )
+
+
 def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> str:
+    if (_background_only_eligible(project) or force_background_only) and _premium_overlay_enabled(project):
+        return _background_image_prompt(project, size=size, scene_direction=scene_direction)
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
@@ -2685,10 +2753,19 @@ Autonomous repair instruction:
             # a bare flag read, so a non-allowlisted customer is not steered toward an
             # overlay layout that will never be composited. Last allowlist-bypassing
             # read after the Phase A unification (census C5).
-            text_contract_line += (
-                " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
-                "(negative space for a text overlay); place the hero food in the centre band."
-            )
+            overlay_copy = _menu_overlay_payload(project)
+            if not overlay_copy["items"] and not overlay_copy["shared_offer_price"]:
+                text_contract_line += (
+                    " Keep the top ~28% and bottom ~14% naturally darker and calm for text. "
+                    "Use one continuous full-frame photograph with the food filling the remaining "
+                    "space; no hard horizontal boundaries, no blurred letterbox panels, "
+                    "and no empty menu band."
+                )
+            else:
+                text_contract_line += (
+                    " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
+                    "(negative space for a text overlay); place the hero food in the centre band."
+                )
         # Overlay owns ALL text → the language hint must NOT instruct text/script
         # rendering (that would reintroduce model-painted, garbled non-English text).
         # Reflect language/culture in IMAGERY only.
@@ -5588,13 +5665,15 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         path.unlink(missing_ok=True)
         raw_path.unlink(missing_ok=True)
         raise FlyerRenderError(f"edited concept failed quality check: {quality_report.blockers}")
-    reference = _source_edit_reference_asset(project)
     write_text_manifest(
         project,
         path,
         output_format="concept_preview",
         selected_concept_id=concept_id,
-        source_path=reference.path,
+        # Finals recompose this edited raw background. The original reference
+        # keeps its own asset/fact provenance; this binding records the bytes
+        # actually used to compose the preview being approved.
+        source_path=raw_path,
         # The output is the customer's uploaded artwork with the deterministic text
         # overlay RE-COMPOSED on top — not a pixel-preserving integrity edit — so the
         # manifest declares the overlaid facts (corroborating visual QA) rather than
@@ -5692,6 +5771,10 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             asset = next((a for a in project.assets if a.asset_id == concept.preview_asset_id), None)
             if asset is not None:
                 candidate = Path(asset.path)
+                # Preview paths can be reused by later renders. Final exports
+                # must still use the bytes recorded for the selected asset.
+                if candidate.is_file() and _sha256(candidate) != asset.sha256.lower():
+                    raise FlyerRenderError("selected preview artifact hash mismatch")
                 quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
                 if quality_report.ok:
                     selected_preview = candidate
@@ -5761,6 +5844,25 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             )
             if direct_poster_source:
                 source = selected_preview
+            else:
+                # Recomposition consumes the raw sidecar, not the approved PNG.
+                # Bind both bytes to the preview's existing producer manifest;
+                # mtime alone cannot distinguish a replaced raw background.
+                try:
+                    binding = json.loads(_text_manifest_path(selected_preview).read_text(encoding="utf-8"))
+                    bound = (
+                        isinstance(binding, dict)
+                        and binding.get("project_id") == project.project_id
+                        and binding.get("project_version") == project.version
+                        and binding.get("selected_concept_id") == concept_id
+                        and binding.get("output_format") == "concept_preview"
+                        and binding.get("artifact_sha256") == selected_preview_asset.sha256.lower()
+                        and binding.get("source_sha256") == _sha256(source)
+                    )
+                except (OSError, ValueError, TypeError):
+                    bound = False
+                if not bound:
+                    raise FlyerRenderError("approved preview raw background binding missing or mismatched")
             if manual_completed_operator_preview:
                 verification_mode = "source_edit_integrity_only"
                 manifest_warnings = [

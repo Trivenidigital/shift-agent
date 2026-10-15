@@ -1094,7 +1094,7 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
             unresolved.append(f"requested event date (day {day}) is not a valid calendar date")
 
     time_match = re.search(
-        r"\b(?:time\s*)?(?:from\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+)?(?:to|as|=|:)\s*"
+        r"\btime\s*(?:from\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+)?(?:to|as|=|:)\s*"
         r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)\b",
         lower,
     )
@@ -1354,6 +1354,22 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
             replace_price_delta_cents = price_delta_cents
             already_applied = True
 
+    # A scalar time cannot replace a locked schedule without losing days,
+    # endpoints or validity terms. Exact visible-text replacement above is the
+    # existing safe path; otherwise ask for that full schedule correction.
+    if "event_time" in updates and any(f.fact_id == "schedule" for f in project.locked_facts):
+        updates.pop("event_time")
+        unresolved.append("please specify the exact schedule text to replace and its full replacement")
+    if "event_or_business_name" in updates and any(
+        f.fact_id in {"campaign_title", "headline"} and f.source not in {"customer_text", "customer_confirmed"}
+        for f in project.locked_facts
+    ):
+        updates.pop("event_or_business_name")
+        unresolved.append("the title is locked by another source and requires confirmation")
+    # Repeating current fields is not an applied edit and must not trigger a
+    # paid regeneration. The caller retains its existing clarification path.
+    updates = {key: value for key, value in updates.items()
+               if value != getattr(project.fields, key, None)}
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)
     ambiguous = bool(unresolved)

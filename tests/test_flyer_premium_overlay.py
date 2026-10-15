@@ -775,3 +775,35 @@ def test_premium_overlay_passes_referee(tmp_path):
     po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
     report = run_visual_qa(proj, out, output_format="concept_preview")
     assert report.blockers == [], f"referee blockers on premium render: {report.blockers}"
+
+def test_sparse_overlay_keeps_lower_hero_visible_and_footer_readable(tmp_path, monkeypatch):
+    project = _project6()
+    project.locked_facts = [f for f in project.locked_facts if not f.fact_id.startswith("item:")]
+    for fact in project.locked_facts:
+        if fact.fact_id == "pricing_structure":
+            fact.value = "Lunch Buffet $12.99 per person"
+    project.raw_request = "Lunch Buffet $12.99 per person"
+    calls = []
+    original = po._draw_centered
+    def record(draw, text, font, **kwargs):
+        calls.append((text, font.size, kwargs["cy"]))
+        return original(draw, text, font, **kwargs)
+    monkeypatch.setattr(po, "_draw_centered", record)
+    output = tmp_path / "sparse.png"
+    po.render_premium_overlay(project, _bg(tmp_path), output, size=(1080, 1350), output_format="concept_preview")
+    # With no menu rows, this is hero space, not an empty dark menu panel.
+    with Image.open(output) as image:
+        assert sum(image.getpixel((100, 1050))) >= 120
+    footer = [(text, size) for text, size, y in calls if y > 1100]
+    assert footer and all(size >= 30 for _text, size in footer), footer
+
+def test_premium_masthead_keeps_word_spacing_and_readable_size(tmp_path, monkeypatch):
+    project = _project6()
+    calls = []
+    original = po._draw_centered
+    def record(draw, text, font, **kwargs):
+        calls.append((text, font.size))
+        return original(draw, text, font, **kwargs)
+    monkeypatch.setattr(po, "_draw_centered", record)
+    po.render_premium_overlay(project, _bg(tmp_path), tmp_path / "brand.png", size=(1080, 1350), output_format="concept_preview")
+    assert any(text == "LAKSHMI'S KITCHEN" and size >= 40 for text, size in calls), calls

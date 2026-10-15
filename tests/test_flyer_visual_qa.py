@@ -3357,3 +3357,39 @@ def test_composer_stamp_does_not_relax_phone(tmp_path):
 
     assert report.status == "failed"
     assert "missing required visible fact: contact_phone" in report.blockers
+
+def test_visual_qa_rejects_repeated_offer_without_typeset_marker(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+    project = _project()
+    project.locked_facts = [FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Lunch Buffet $12.99 per person.", source="customer_text", required=True)]
+    artifact = tmp_path / "offer.png"
+    artifact.write_bytes(b"image")
+    artifact.with_suffix(".png.ocr.txt").write_text("Lunch Buffet $12.99 per person.\nOffer: Lunch Buffet $12.99 per person", encoding="utf-8")
+    report = run_visual_qa(project, artifact, output_format="whatsapp_image", allow_sidecar=True)
+    assert any("duplicate offer visible" in item for item in report.blockers), report
+
+
+def test_visual_qa_rejects_request_fragment_without_typeset_marker(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+    project = _project()
+    project.locked_facts = []
+    artifact = tmp_path / "fragment.png"
+    artifact.write_bytes(b"image")
+    artifact.with_suffix(".png.ocr.txt").write_text("I need a\nLunch Buffet $12.99 per person", encoding="utf-8")
+    report = run_visual_qa(project, artifact, output_format="whatsapp_image", allow_sidecar=True)
+    assert any("request fragment visible" in item for item in report.blockers), report
+
+
+def test_visual_qa_preserves_explicit_headline_and_distinct_offers(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+    project = _project()
+    project.locked_facts = [
+        FlyerLockedFact(fact_id="headline", label="Headline", value="I Need A Hero", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Lunch Buffet $12.99 per person", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="offer:0", label="Offer", value="Dinner Buffet $15.99 per person", source="customer_text", required=True),
+    ]
+    artifact = tmp_path / "valid.png"
+    artifact.write_bytes(b"image")
+    artifact.with_suffix(".png.ocr.txt").write_text("I Need A Hero\nLunch Buffet $12.99 per person\nDinner Buffet $15.99 per person", encoding="utf-8")
+    report = run_visual_qa(project, artifact, output_format="whatsapp_image", allow_sidecar=True)
+    assert not any("duplicate offer visible" in item or "request fragment visible" in item for item in report.blockers), report
