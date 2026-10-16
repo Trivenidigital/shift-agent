@@ -303,6 +303,10 @@ def compose_premium_poster_v1(
         return None, {"eligible": False, "reason": "multi-price offer (single badge price would mutate the offer)"}
 
     w, h = size
+    short_shared_menu = bool(price and 3 <= len(items) <= 6 and not any(
+        _fid(f).startswith("item:") and _fid(f).endswith(":price")
+        and _val(f) and _val(f).replace(" ", "") != price
+        for f in locked_facts))
     food_fallback_reason = ""
     if food_image_path:
         try:
@@ -332,6 +336,19 @@ def compose_premium_poster_v1(
         food_fallback_reason = "no_image"
 
     draw = ImageDraw.Draw(img)
+    if short_shared_menu:
+        # The compact treatment is optional. Keep the existing layout when
+        # uppercase copy or the smaller badge cannot preserve the whole fact.
+        compact_px, compact_lines = _fit_headline(
+            draw, headline.upper(), max_w=int(w * .92), max_px=int(w * .070))
+        compact_width = int(w * .72)
+        compact_radius = int(compact_width * .175)
+        headline_fits = all(_text_w(draw, line, _headline_font(compact_px)) <= int(w * .92)
+                            for line in compact_lines)
+        label_fits = not label or _fit_badge_label_px(
+            draw, label.upper(), max_w=int(compact_radius * 1.6),
+            max_px=max(22, int(compact_width * .030))) is not None
+        short_shared_menu = headline_fits and label_fits
     placed_text: list[str] = []
     regions: dict = {}
     fonts: dict = {}
@@ -354,7 +371,9 @@ def compose_premium_poster_v1(
     placed_text.append(business.upper())
 
     # ── headline (bold, dominant, auto-fit up to 2 lines) ──
-    head_px, head_lines = _fit_headline(draw, headline, max_w=int(w * 0.92), max_px=int(w * 0.115))
+    head_px, head_lines = _fit_headline(
+        draw, headline.upper() if short_shared_menu else headline,
+        max_w=int(w * 0.92), max_px=int(w * (0.070 if short_shared_menu else 0.115)))
     hf = _headline_font(head_px)
     hy = int(h * 0.135)
     line_h = int(head_px * 1.06)
@@ -366,20 +385,25 @@ def compose_premium_poster_v1(
     placed_text.extend(head_lines)
 
     # ── offer badge (framed, large, dominant) ──
-    badge_cx, badge_cy = int(w * 0.5), int(h * 0.50)
-    badge_r, badge_drawn = _draw_offer_badge(img, draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=w)
+    badge_width = int(w * .72) if short_shared_menu else w
+    badge_cx, badge_cy = ((int(w * .80), int(h * .35)) if short_shared_menu
+                          else (int(w * .5), int(h * .50)))
+    if short_shared_menu:
+        badge_cy = max(badge_cy, hy + int(w * .02) + int(badge_width * .175))
+    badge_r, badge_drawn = _draw_offer_badge(img, draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=badge_width)
     draw = ImageDraw.Draw(img)  # badge composites a halo paste; re-bind for the rest
     regions["offer"] = (badge_cx - badge_r, badge_cy - badge_r, badge_r * 2, badge_r * 2)
-    offer_px = max(READABILITY_FLOOR_PX, int(w * 0.10))  # matches the badge price font
+    offer_px = max(READABILITY_FLOOR_PX, int(badge_width * 0.10))  # matches the badge price font
     fonts["offer_price"] = offer_px
     placed_text.extend(badge_drawn)  # exactly what the badge drew (mirrors canvas)
 
     # ── item-list block (LARGE, readable, auto-columned) ──
     iz_x, iz_y = int(w * 0.07), int(h * 0.625)
     iz_w, iz_h = int(w * 0.86), int(h * 0.255)
-    # panel
-    _rounded_panel(img, (iz_x - 18, iz_y - 18, iz_x + iz_w + 18, iz_y + iz_h + 18), fill=_PANEL, alpha=200)
-    draw = ImageDraw.Draw(img)
+    if short_shared_menu:
+        # Size the short menu to its rows instead of covering a fixed fraction
+        # of the photograph with unused panel space (especially in Stories).
+        iz_h = min(iz_h, ((len(items) + 1) // 2) * int(48 * 1.5))
     item_px, ncols, rows_fit, overflow = _fit_item_block(draw, items, zone_w=iz_w, zone_h=iz_h)
     if overflow:
         # A partial menu must never ship: dropped items are customer-supplied
@@ -389,6 +413,11 @@ def compose_premium_poster_v1(
         return None, {"eligible": False, "reason": "items overflow the readable item zone (partial menu never composed)"}
     itf = _premium_font("footer", item_px)
     line_h = int(item_px * 1.5)
+    if short_shared_menu:
+        iz_h = rows_fit * line_h
+        iz_y = int(h * .875) - iz_h
+    _rounded_panel(img, (iz_x - 18, iz_y - 18, iz_x + iz_w + 18, iz_y + iz_h + 18), fill=_PANEL, alpha=200)
+    draw = ImageDraw.Draw(img)
     col_w = iz_w // ncols
     shown = items
     for idx, it in enumerate(shown):
