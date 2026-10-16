@@ -358,7 +358,10 @@ def test_armed_r2b1_fires_first_and_escape_gate_never_invoked(monkeypatch):
     assert result["action"] == "skip" and "captured for L0015" in result["reason"], result
     assert [a["reason"] for a in audits] == ["catering_amendment_conflict_captured"]
     assert escape_calls["n"] == 0, "R2B-1 armed ⇒ escape gate MUST NOT be invoked"
-    assert classify_calls["n"] == 0, "R2B-1 armed ⇒ escape gate's classify_catering MUST NOT run"
+    # Exactly ONE call: the intake catering-question gate (which precedes R2B-1
+    # and falls through here — no `primary:catering`) classifies via the shared
+    # dispatch memo; the escape gate is never reached, so nothing re-classifies.
+    assert classify_calls["n"] == 1, "R2B-1 armed ⇒ escape gate's classify_catering MUST NOT run"
 
 
 def _real_finalize_leaf_deps(monkeypatch, actions_mod, proj):
