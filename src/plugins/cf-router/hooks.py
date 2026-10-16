@@ -6425,6 +6425,26 @@ def _send_customer_complaint_escalation(
             "reason": "cf-router customer complaint escalation sent"}
 
 
+def _open_lead_explicit_qty_escape(
+    text: str, chat_id: str, phone: Optional[str], role: str, open_lead: dict,
+    *, has_media: bool,
+) -> bool:
+    """True when F7's explicit-quantity arm would fully engage on `text` for this
+    open lead: same rollout gate, same live-menu extractor, every phrase matched,
+    and no explicit flyer edit signal. Never raises (a broken check is closed)."""
+    try:
+        if role == "owner" or not _explicit_qty_allowlisted(chat_id, phone):
+            return False
+        if open_lead.get("status") not in actions.FINALIZE_ELIGIBLE_LEAD_STATUSES:
+            return False
+        extraction = actions.extract_explicit_line_items_from_menu(text)
+        if extraction is None or not extraction.matched or extraction.unmatched:
+            return False
+        return not _flyer_edit_signal_present(text, has_media=has_media)
+    except Exception:  # noqa: BLE001 — fail closed: fall through as before
+        return False
+
+
 def _try_flyer_catering_escape_gate(
     text: str, chat_id: str, event: Any, media_path: Optional[str] = None,
     *, classify_fn: Optional[Callable[[str], tuple]] = None,
@@ -6454,6 +6474,8 @@ def _try_flyer_catering_escape_gate(
       complaint + (open lead OR project) → one escalation ack (customer_complaint_escalation)
       catering=False, open lead + proposal/menu ask, not a flyer edit
                                          → delegate to the F7 catering path (open-lead escape)
+      catering=False, open lead + fully-matched explicit quantities (allowlisted,
+        finalize-eligible lead), not a flyer edit → delegate to F7 (explicit-qty arm)
       catering=False, otherwise          → _GATE_FALLTHROUGH (flyer arms run unchanged)
       catering=True, no flyer signal     → delegate to the F7 new-catering path
       catering=True, flyer signal (ambiguous) → one flyer-vs-catering clarification
@@ -6507,6 +6529,23 @@ def _try_flyer_catering_escape_gate(
                     chat_id=chat_id,
                     detail=(f"project_id={project_id}; status={status}; "
                             f"sender_role={role}; open_lead={open_lead.get('lead_id')}"),
+                )
+                return ("f7", signals)
+            # Open-lead explicit-quantity escape: "10 Veg Biryani, 5 Paneer Butter
+            # Masala" carries no catering signal, so without this the flyer
+            # revision arm captures the order. Escapes ONLY when F7's explicit-qty
+            # arm will engage on it (same allowlist, same menu extractor, a
+            # finalize-eligible lead, every phrase matched) and the text is not a
+            # flyer edit. Fail closed: any error here falls through as before.
+            if open_lead is not None and _open_lead_explicit_qty_escape(
+                text, chat_id, phone, role, open_lead, has_media=bool(media_path),
+            ):
+                actions.audit_intercepted(
+                    reason="flyer_active_project_open_lead_catering_escape",
+                    chat_id=chat_id,
+                    detail=(f"project_id={project_id}; status={status}; "
+                            f"sender_role={role}; open_lead={open_lead.get('lead_id')}; "
+                            f"escape=explicit_qty"),
                 )
                 return ("f7", signals)
             return ("fallthrough",)
