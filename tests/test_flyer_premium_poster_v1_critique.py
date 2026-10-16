@@ -76,8 +76,9 @@ def test_prompt_requests_negative_space_safe_zones():
     p = build_textless_food_prompt(_snack(), select_food_poster_scene("snack"))
     low = p.lower()
     assert "negative space" in low
-    assert "upper third" in low and "lower band" in low
-    assert ("centre" in low or "center" in low or "mid-background" in low)
+    assert "natural soft negative space" in low
+    assert "upper third" not in low and "lower band" not in low
+    assert "keep the food prominent" in low
     # the revision must NOT weaken the no-text contract
     assert "no text" in low and "no prices" in low and "no logos" in low
 

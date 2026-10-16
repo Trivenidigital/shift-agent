@@ -95,6 +95,17 @@ def test_existing_campaign_scene_selector_unchanged():
 
 # ── prompt: forbids ALL text; facts guide food only ─────────────────────────
 
+def test_background_prompt_keeps_photograph_continuous_without_reserved_bands():
+    prompt = build_textless_food_prompt(_snack_fixture(), select_food_poster_scene("snack")).lower()
+    assert "single exposure" in prompt and "edge-to-edge" in prompt
+    assert "no hard horizontal boundaries" in prompt
+    assert "no header/footer strips" in prompt
+    assert "natural" in prompt and "soft" in prompt
+    assert "upper third" not in prompt and "lower band" not in prompt
+    assert "overlay-safe zones" not in prompt
+    assert TEXTLESS_CONTRACT.lower() in prompt
+
+
 def test_prompt_forbids_text_logos_numbers_prices():
     prompt = build_textless_food_prompt(_snack_fixture(), select_food_poster_scene("snack"))
     low = prompt.lower()

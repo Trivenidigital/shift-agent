@@ -20,9 +20,9 @@ try:
 except ImportError:
     from agents.flyer.facts import reference_prices_omitted, requests_generated_item_suggestions
 try:
-    from flyer_semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers  # type: ignore
+    from flyer_semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers, _ORG_SUFFIX_RE, _norm_contains  # type: ignore
 except ImportError:
-    from agents.flyer.semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers
+    from agents.flyer.semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers, _ORG_SUFFIX_RE, _norm_contains
 
 
 # Bracketed slot leakage ([price], [phone], …) + lorem ipsum + common template-
@@ -2213,6 +2213,39 @@ def _transcript_blockers(
     return blockers
 
 
+def _item_candidate_brand_reread_blockers(
+    project: FlyerProject, extracted_text: str, blockers: list[str],
+) -> set[str]:
+    """Identify same-candidate heuristic brand hits eligible for a neutral read.
+
+    This changes no brand verdict: explicit identities, source brands and
+    organization suffixes remain ineligible, and the second read runs all gates.
+    """
+    if re.search(r"\b(?:business|brand|company)\s*:", extracted_text, re.IGNORECASE):
+        return set()
+
+    def candidate_key(value: str) -> str:
+        value = re.sub(r"^[\s\-*•★●▪‣➤>]+", "", value)
+        return " ".join(value.strip(" .,:;").casefold().split())
+
+    near_candidates = {
+        candidate_key(b.rpartition(" but saw ")[2]) for b in blockers
+        if b.startswith("near-duplicate item visible:") and " but saw " in b
+    }
+    source_names = [str(name) for ext in project.reference_extractions or []
+                    for name in getattr(getattr(ext, "source_contract", None), "source_business_names", [])]
+    eligible = set()
+    prefix = "visible wrong business/brand: "
+    for blocker in blockers:
+        if not blocker.startswith(prefix):
+            continue
+        candidate = candidate_key(blocker[len(prefix):])
+        if (candidate and candidate in near_candidates and not _ORG_SUFFIX_RE.search(candidate)
+                and not any(name.strip() and _norm_contains(candidate, name) for name in source_names)):
+            eligible.add(blocker)
+    return eligible
+
+
 def run_visual_qa(
     project: FlyerProject,
     artifact_path: Path | str,
@@ -2231,10 +2264,12 @@ def run_visual_qa(
         ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
         extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
         primary_blockers = _transcript_blockers(project, artifact, extracted_text, provider_notes) if extracted_text else []
+        same_item_brand = _item_candidate_brand_reread_blockers(project, extracted_text, primary_blockers)
         # Re-reading spelling cannot erase any other adverse primary evidence.
         spelling_only = bool(primary_blockers) and all(
             b.startswith("near-duplicate item visible:")
             or re.fullmatch(r"missing required visible fact: item:\d+:name", b)
+            or b in same_item_brand
             for b in primary_blockers)
         if (extracted_text and qa_source == "ocr_vision"
                 and ocr_model != REGIONAL_QA_MODEL and spelling_only
