@@ -219,8 +219,14 @@ In-tree capabilities cover this requirement. No new service, dictionary, router,
 - Other agents affected: none. Protected identity, price, phone, address, schedule, offer restrictions remain authoritative.
 - Vertical E2E proof: exact F0231 original brief extracts canonical Mysore Pak; actual render and OCR agree; original raw text preserved; invalid/ambiguous changes retain original.
 Repo-meta capability map above covers plan/evidence changes.
-- [ ] Regression tests and same-call model correction integration.
-- [ ] Real-model exact brief replay, audit and visual proof.
-- [ ] Independent review, CI, canonical release, installed-code verification.
+- [x] Regression tests and same-call model correction integration.
+- [x] Real-model exact brief replay, audit and visual proof.
+- [x] Independent review, CI, canonical release, installed-code verification.
 
 Spelling verification:110focused extraction/seam/intake tests passed;200semantic/QA tests passed; independent121test review GO. Exact F0231 real-model response independently returned original Mysoore Pak + corrected Mysore Pak and clear_spelling_error; raw preserved, canonical notes/facts rendered. First replay exposed brand heuristic misclassifying declared Any Item/Mysore Pak with savedtemplate; reproduced/fixed via exact declared-copy exception, retaining explicit brand/source/orgsuffix checks. Secondpreview passed realOCR and visually confirmed canonicalspelling. Final exports/releasegate pending.
+
+### Spelling correction release — 2026-10-15 23:44 UTC
+PR #804 merged2543afdf79965b7a563ed7ea5302259122684e19, deployed normally as deploy-20261015-234133-2543afdf. Canonical exact-source full gate878b1bbb:10,492passed47skipped in792.54seconds; all eightCIchecks passed; independentreviewGO. Mergeddeployabletree identical; canonicalpackaging reranmanifestcheck and reusedcompletedpytest gate. ArtifactSHA25642d68a16e1ff6275fe4b1aaf968ed55d74ebfde2f8a96d66ca3f3d8860973ea7 verifiedonhost. Previousrollback81e3e704 retained; no configuration/allowlist/Hermes changes.
+Receipt installed23:41:34Z; all deploysmokechecks passed. Both production Python interpreters as serviceUID999 verified fivechangedruntimefile hashes and flatmodule origins. Gatewayactive/running,NRestarts0,bridgeconnected,queue0.
+Installed-code isolated replay made fresh real extraction/image/OCR calls: originalF0231rawrequest retained; MysoorePak correctedtoMysorePak; displaynotes/facts consistent; preview andallfourformats passedfreshOCR. Actualimage inspected for canonicalspelling. OriginalgenuineF0231 project unchanged; nohandsetapproval/delivery manufactured. Existing auditreason recordsacceptedbefore/after. Privateevidence:spelling-postdeploy-replay.log,spelling-postdeploy-health.log,spelling-deployed-audit.log,spelling-deployed-final-qa.json,flyer-spelling-corrected-deployed.png.
+Scope: clear, bounded item/title spelling corrections proposed by existing extraction model; valid/ambiguous regional forms and unsafe changes retain source. Protectedprices/identity/contacts/address/schedule unchanged. No globalfuzzyQAwaiver orhandwrittenfooddictionary. Multi-item visualdesign andgenuinehandsetend-to-endacceptance remain separatework; do notclaimallproductionreadinessfromthisspellingrelease.

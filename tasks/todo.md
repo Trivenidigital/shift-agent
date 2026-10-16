@@ -2150,3 +2150,8 @@ User authorized focused repair after F0229 visual failure. Plan: tasks/flyer-pro
 - [x] Flyer repair #802 deployed as 35cd85ef; 10,468 full-gate tests passed; all CI and production smoke checks passed; installed-code isolated preview/four-export OCR passed. See flyer-production-repair-20261015.md. Real handset approval/delivery and broader visual acceptance remain rollout gates.
 
 - [x] Visual polish #803 deployed81e3e704: continuous photo, separated footer, price/disclaimer hierarchy/contrast; 10,475tests passed, all CI/smoke checks passed, installed preview/four-export OCR passed. Human WhatsApp approval/delivery remains to be performed with new preview.
+
+- [x] Automatic clear item/title spelling correction #804 deployed2543afdf; originalsource retained; same-call model correction beforelocking; realinstalledF0231replay canonicalMysorePak andfour-exportOCRpassed;10,492fulltests/allCI/smokespassed. GenuineF0231history/approval unchanged.
+
+## F0231 recovery and multi-item production repair
+- [ ] Complete tasks/f0231-recovery-plan-20261016.md: literal OCR, six-item visual polish, same-project recovery and verified preview delivery; human final approval required.

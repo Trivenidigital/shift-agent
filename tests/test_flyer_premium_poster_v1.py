@@ -51,6 +51,61 @@ def _items(facts):
     return [f.value for f in facts if f.fact_id.startswith("item:") and f.fact_id.endswith(":name")]
 
 
+def _six_item_shared_price_fixture():
+    return [
+        _fact("business_name", "Sample Kitchen"),
+        _fact("campaign_title", "evening snacks"),
+        _fact("pricing_structure", "Any item $4.99"),
+        *[_fact(f"item:{i}:name", name) for i, name in enumerate(
+            ["Ariselu", "Boorelu", "Chagodi", "Mysore Pak", "Laddoo", "Kaaja"])],
+        *[_fact(f"item:{i}:price", "$4.99") for i in range(6)],
+        _fact("location", "123 Sample Rd Example City FL"),
+        _fact("contact_phone", "+12025550142"),
+    ]
+
+
+@pytest.mark.parametrize("size", [(1080, 1350), (1080, 1080), (1080, 1920), (1275, 1650)])
+def test_short_shared_menu_preserves_hero_and_measures_panel(size):
+    facts = _six_item_shared_price_fixture()
+    img, report = compose_premium_poster_v1(facts, size=size)
+    assert img is not None and report["eligible"]
+    assert report["items"] == _items(facts)
+    assert report["offer_price"] == "$4.99"
+    regions = report["regions"]
+    assert report["fonts"]["menu"] < report["fonts"]["headline"] <= int(size[0] * .075)
+    assert regions["headline"][3] < size[1] * .14
+    ox, oy, ow, oh = regions["offer"]
+    assert ox > size[0] * .55  # leave the central food photograph visible
+    assert ow < size[0] * .28
+    ix, iy, iw, ih = regions["items"]
+    assert ih <= report["item_px"] * 1.5 * 3 + 2
+    assert oy + oh < iy
+    assert iy + ih + 18 < regions["footer"][1]
+    for x, y, width, height in regions.values():
+        assert x >= 0 and y >= 0 and x + width <= size[0] and y + height <= size[1]
+
+
+@pytest.mark.parametrize("count", [3, 4, 5, 6])
+@pytest.mark.parametrize("long_field", ["headline", "offer"])
+def test_short_menu_keeps_original_layout_when_compact_text_cannot_fit(count, long_field):
+    from PIL import ImageDraw
+    from agents.flyer import premium_poster_v1 as poster
+    facts = [f for f in _six_item_shared_price_fixture()
+             if not f.fact_id.startswith("item:") or int(f.fact_id.split(":")[1]) < count]
+    for fact in facts:
+        if long_field == "headline" and fact.fact_id == "campaign_title":
+            fact.value = "Freshly Prepared Traditional Evening Snack Specials"
+        if long_field == "offer" and fact.fact_id == "pricing_structure":
+            fact.value = "Any two evening snacks $4.99"
+    img, report = compose_premium_poster_v1(facts, size=(1080, 1080))
+    assert img is not None
+    assert report["offer_badge_radius"] == int(1080 * .175)
+    assert report["offer_label"].upper() in report["placed_text"]
+    draw = ImageDraw.Draw(img)
+    px, lines = poster._fit_headline(draw, poster._headline(facts), max_w=int(1080 * .92), max_px=report["fonts"]["headline"])
+    assert all(poster._text_w(draw, line, poster._headline_font(px)) <= int(1080 * .92) for line in lines)
+
+
 # ── eligibility + output ────────────────────────────────────────────────────
 
 def test_composer_produces_output_for_snack_fixture():

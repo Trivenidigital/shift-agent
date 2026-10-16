@@ -1690,10 +1690,17 @@ VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VIS
 REGIONAL_QA_MODEL = os.environ.get("FLYER_REGIONAL_QA_MODEL") or "google/gemini-2.5-flash"
 VISION_QA_PROMPT = """Read this generated flyer/poster image as OCR/vision QA.
 
+Transcribe the visible characters literally, preserving line breaks, repeated
+letters, misspellings, regional spellings and transliterations. Do not correct spelling,
+normalize names, translate, expand abbreviations, or substitute a familiar word
+for the lettering shown. Read the image, not what the text probably meant.
+If characters are uncertain or unreadable, describe that uncertainty in quality_notes;
+do not complete the word by guessing. Keep observations separate from extracted_text.
+
 Return STRICT JSON only:
 {
   "extracted_text": "all visible flyer text you can read, preserving names, prices, dates, phones, addresses, badges, and placeholders",
-  "quality_notes": ["short factual notes about unreadable/garbled text, visible placeholders, any text that appears duplicated, or any clearly misspelled word"]
+  "quality_notes": ["short factual notes about visually malformed or unreadable glyphs, visible placeholders, or duplicated text; do not give dictionary spelling advice about clearly readable lettering"]
 }
 
 Do not invent missing text. If no readable text exists, return an empty extracted_text string.
@@ -1759,7 +1766,7 @@ def _vision_text(path: Path, *, model: str = VISION_QA_MODEL) -> tuple[str, str,
             "role": "user",
             "content": [
                 {"type": "text", "text": VISION_QA_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}", "detail": "high"}},
             ],
         }],
         "response_format": {"type": "json_object"},
@@ -2118,9 +2125,26 @@ def run_visual_qa(
         allow_sidecar = os.environ.get("FLYER_QA_ALLOW_SIDECAR") == "1"
     extracted_text, provider, qa_source = _sidecar_text(artifact, allow_sidecar=allow_sidecar)
     provider_notes: list[str] = []
+    read_observations: list[str] = []
     if not extracted_text:
         ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
         extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
+        if (extracted_text and qa_source == "ocr_vision"
+                and ocr_model != REGIONAL_QA_MODEL
+                and _near_duplicate_item_blockers(project, extracted_text)):
+            # One independent literal read, with no expected copy in the request.
+            # Replace the whole observation, never patch a name to match facts;
+            # every strict gate below still evaluates the resulting transcript.
+            reread_text, reread_provider, reread_source, reread_notes = _vision_text(
+                artifact, model=REGIONAL_QA_MODEL)
+            if reread_text.strip() and reread_provider != "unavailable":
+                extracted_text, provider, qa_source, provider_notes = (
+                    reread_text, reread_provider, reread_source, reread_notes)
+                read_observations.append(
+                    f"OCR re-verification: {REGIONAL_QA_MODEL}; primary: {ocr_model}")
+            else:
+                read_observations.append(
+                    f"OCR re-verification unavailable: {REGIONAL_QA_MODEL}; retained primary: {ocr_model}")
     blockers: list[str] = []
     if not extracted_text:
         _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
@@ -2237,6 +2261,7 @@ def run_visual_qa(
         qa_source=qa_source,
         status="failed" if blockers else "passed",
         blockers=blockers,
+        warnings=read_observations,
         severity=classify_qa_severity(blockers, project=project),
         extracted_text=extracted_text,
         checked_at=datetime.now(timezone.utc),
