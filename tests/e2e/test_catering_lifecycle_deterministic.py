@@ -722,6 +722,68 @@ def test_explicit_quantities_reach_owner_card_and_quote_with_no_operator_step(sa
     assert_only_stub_saw_traffic(sb)
 
 
+def test_owner_card_total_is_the_exact_cents_the_customer_is_quoted(sandbox, monkeypatch):
+    """The offline-rehearsal order: "10 Veg Biryani, 5 Paneer Butter Masala" at
+    $14.99 / $12.99. The owner card used to read "Internal estimate ...: $215"
+    (whole-dollar rounding of 21485 cents) while the customer was then quoted
+    $214.85 — the owner approved a number the customer never received. Both
+    surfaces must now render the SAME frozen `pricing_inputs.total_cents`."""
+    from types import SimpleNamespace
+
+    from catering_pricing import derive_item_overrides
+    from schemas import Menu
+    from test_catering_turn_arbitration_e2e import _load_plugin
+
+    sb = sandbox
+    menu = Menu.model_validate(json.loads(sb.menu_path.read_text(encoding="utf-8")))
+    overrides, _excluded = derive_item_overrides(menu.items)
+    assert overrides["Veg Biryani"] == 1499 and overrides["Paneer Butter Masala"] == 1299
+    (sb.state / "catering-pricebook.json").write_text(
+        json.dumps(build_catering_pricebook(item_price_overrides=overrides)), encoding="utf-8")
+
+    lead = open_lead(sb, "wamid.EC.001")
+    lead_id, code = lead["lead_id"], lead["owner_approval_code"]
+    owner_before = len(sb.to(OWNER_JID))
+
+    _plugin_env(sb, monkeypatch)
+    hooks, actions = _load_plugin()
+    actions.lid_to_phone_via_identify_sender = (
+        lambda cid: ("+19045550100", "owner") if cid == OWNER_JID else (CUSTOMER_PHONE, "customer"))
+
+    out = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="10 Veg Biryani, 5 Paneer Butter Masala", chat_id=CUSTOMER_JID,
+        message_id="wamid.EC.002"))
+    assert out is not None and out["action"] == "skip" and "explicit" in out["reason"], out
+
+    lead = sb.lead(lead_id)
+    assert lead["status"] == "CUSTOMER_FINALIZED", lead["status"]
+    assert [(i["name"], i["qty"]) for i in lead["selected_items"]] == [
+        ("Veg Biryani", 10), ("Paneer Butter Masala", 5)]
+    frozen_cents = lead["pricing_inputs"]["total_cents"]
+    assert frozen_cents == 21485, lead["pricing_inputs"]
+    assert lead["quote_total_usd"] == 215, "precondition: the whole-dollar field rounds"
+
+    cards = sb.to(OWNER_JID)[owner_before:]
+    assert len(cards) == 1, cards
+    card = cards[0]["message"]
+    assert code.startswith("#") and f"{code} approve" in card, card
+    assert "$214.85" in card, card
+    assert "$215" not in card, f"owner card shows the whole-dollar total: {card!r}"
+    assert "Veg Biryani × 10  $149.90 (@ $14.99)" in card, card
+    assert "Paneer Butter Masala × 5  $64.95 (@ $12.99)" in card, card
+
+    customer_before = len(sb.to(CUSTOMER_JID))
+    approved = hooks._try_f8_intercept(f"{code} approve", OWNER_JID, "wamid.EC.003")
+    assert approved is not None and approved["action"] == "skip", approved
+    assert sb.lead(lead_id)["status"] == "SENT_TO_CUSTOMER"
+    quotes = sb.to(CUSTOMER_JID)[customer_before:]
+    assert len(quotes) == 1, quotes
+    assert "Total: $214.85" in quotes[0]["message"], quotes[0]["message"]
+    # Consistency: the owner approved exactly the total the customer received.
+    assert _cents(frozen_cents) in card and f"Total: {_cents(frozen_cents)}" in quotes[0]["message"]
+    assert_only_stub_saw_traffic(sb)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # NEGATIVES — each asserts the SPECIFIC refusal, never merely "nonzero"
 # ═════════════════════════════════════════════════════════════════════════════

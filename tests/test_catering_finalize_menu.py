@@ -269,10 +269,15 @@ DEFAULT_MENU = [
 
 
 def test_owner_card_labels_total_as_internal_estimate():
+    """The whole-dollar "Internal estimate" wording survives for leads with no
+    frozen cents (legacy no-pricebook path); a lead WITH frozen cents shows the
+    exact quote total instead. Template + inline fallback share one line."""
     template = (TEMPLATES_DIR / "catering_finalized_menu_to_owner.txt").read_text(encoding="utf-8")
-    assert "Internal estimate from current menu item prices" in template
+    assert "{quote_total_line}" in template
+    assert "${quote_total_usd}" not in template, "whole-dollar total on the owner card"
     script_text = SCRIPT.read_text(encoding="utf-8")
     assert "Internal estimate from current menu item prices" in script_text
+    assert "exactly what the customer will be quoted" in script_text
 
 
 # ============================================================================
