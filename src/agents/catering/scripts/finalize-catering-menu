@@ -359,6 +359,7 @@ def _render_owner_card(
     quote_diff_line: str = "",
     price_status: str = "estimated",
     qc=None,
+    pricing_inputs=None,
 ) -> str:
     """Render owner card. Caller passes (name, qty, price) tuples — on FIRST
     finalize the prices are current-menu values; on REPLAY the caller passes
@@ -372,6 +373,14 @@ def _render_owner_card(
     PR-B: when `quote_version` is set, the card carries a "Quote version N" line
     so the owner approves a specific committed VERSION (reviewer criterion 1),
     plus a short diff line vs N-1 when `quote_diff_line` is non-empty (N>1).
+
+    `pricing_inputs` is the lead's FROZEN cents commitment — the exact record
+    `apply-catering-owner-decision --quote-from-lead-state` renders the customer
+    quote from. When present, every amount the owner approves (unit, line,
+    subtotal, total) is formatted from those cents, so the card can never show
+    a whole-dollar figure ($215) for a quote the customer receives as $214.85.
+    Absent (legacy no-pricebook path / pre-provenance leads) the card keeps its
+    whole-dollar "Internal estimate" wording.
     """
     template_path = TEMPLATE_DIR / "catering_finalized_menu_to_owner.txt"
     # PR-B version banner (empty when no committed version is available — the
@@ -382,20 +391,36 @@ def _render_owner_card(
         quote_version_line = f"Quote version {quote_version}\n"
         if quote_diff_line:
             quote_version_line += f"Changes since v{quote_version - 1}: {quote_diff_line}\n"
-    # Line amounts from the kernel's cents when this card describes a fresh
-    # computation: whole-dollar unit × qty drifts (200 × $8.50 rendered $1800 vs
-    # the true $1,700.00), and the lines then stop adding up to the cents total.
-    # A replay (qc=None) keeps the persisted whole-dollar rows it always showed.
-    unit_cents_by_name = {
-        ln.name: ln.unit_cents for ln in (qc.lines if qc is not None else [])
-        if ln.unit_cents is not None
-    }
+    # Line amounts from the frozen cents (else this run's kernel lines):
+    # whole-dollar unit × qty drifts (200 × $8.50 rendered $1800 vs the true
+    # $1,700.00), and the lines then stop adding up to the cents total. A
+    # lead with neither keeps the persisted whole-dollar rows it always showed.
+    if pricing_inputs is not None:
+        unit_cents_by_name = {li.name: li.unit_cents for li in pricing_inputs.line_items}
+    else:
+        unit_cents_by_name = {
+            ln.name: ln.unit_cents for ln in (qc.lines if qc is not None else [])
+            if ln.unit_cents is not None
+        }
 
     def _line_amount(name: str, qty: int, price: int) -> str:
         cents = unit_cents_by_name.get(name)
         if cents is None:
             return f"${qty * price}"
-        return _pricing.format_cents(qty * cents)
+        return (f"{_pricing.format_cents(qty * cents)} "
+                f"(@ {_pricing.format_cents(cents)})")
+
+    if pricing_inputs is not None:
+        total_display = _pricing.format_cents(pricing_inputs.total_cents)
+        quote_total_line = (
+            f"Subtotal: {_pricing.format_cents(pricing_inputs.subtotal_cents)}\n"
+            f"Quote total (exactly what the customer will be quoted): {total_display}"
+        )
+    else:
+        total_display = f"${server_total}"
+        quote_total_line = (
+            f"Internal estimate from current menu item prices: {total_display}"
+        )
 
     items_section = "\n".join(
         f"  - {name} × {qty}  {_line_amount(name, qty, price)}"
@@ -417,7 +442,7 @@ def _render_owner_card(
         and server_total / headcount_val < min_per_guest_usd
     ):
         price_warning = (
-            f"⚠ ${server_total} is only ${server_total / headcount_val:.2f}/guest for "
+            f"⚠ {total_display} is only ${server_total / headcount_val:.2f}/guest for "
             f"{headcount_val} guests — the menu may not be scaled to the headcount. "
             f"Edit before approving.\n\n"
         )
@@ -433,6 +458,7 @@ def _render_owner_card(
         "item_count": len(items_with_prices),
         "items_section": items_section,
         "quote_total_usd": server_total,
+        "quote_total_line": quote_total_line,
         "price_drift_note": drift_note,
         "price_warning": price_warning,
         "quote_version_line": quote_version_line,
@@ -466,7 +492,7 @@ def _render_owner_card(
         f"Selected menu ({fmt_fields['item_count']} items):\n"
         f"{items_section}\n\n"
         f"{fmt_fields['price_breakdown']}"
-        f"Internal estimate from current menu item prices: ${server_total}\n"
+        f"{quote_total_line}\n"
         f"{fmt_fields['price_status_line']}\n"
         f"Review/edit before approving the final customer quote.\n"
         f"{drift_note}\n\n"
@@ -1219,6 +1245,10 @@ def main() -> int:
             # the persisted one the owner already saw — omit it and keep the
             # card consistent with the persisted total.
             qc=(None if replay else qc),
+            # The frozen cents on the lead: just written on a fresh finalize,
+            # the committed record on a replay — the same object the customer
+            # quote is rendered from after `#CODE approve`.
+            pricing_inputs=target.pricing_inputs,
         )
         ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
         if ok:
