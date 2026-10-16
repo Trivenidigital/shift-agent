@@ -22,6 +22,7 @@ capture · R2B-1 precedence + placement.
 from __future__ import annotations
 
 import ast
+import json
 import importlib.machinery
 import importlib.util
 import sys
@@ -854,3 +855,124 @@ def test_a_failure_in_the_complaint_escalation_does_not_add_a_clarification(monk
     assert len(s.sent) == 1, s.sent
     assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
     assert any("RuntimeError" in str(a.get("detail", "")) for a in s.audits)
+
+
+
+# ── Open-lead explicit-quantity escape ──────────────────────────────────────
+# A customer with an active flyer project AND an open catering lead sends a
+# bare per-item order. classify_catering scores it weak and it is not a
+# proposal/mix-and-match ask, so before this escape the flyer revision arm
+# captured it as a flyer edit and F7's explicit-qty arm never ran.
+EXPLICIT_ORDER = "10 Veg Biryani, 5 Paneer Butter Masala"
+
+
+def _wire_explicit(monkeypatch, tmp_path, *, allowlist=PHONE, open_lead=None, **kw):
+    """_wire + a real menu file + the explicit-qty allowlist. Returns
+    (hooks, actions, spies, real_f7) — real_f7 is the unstubbed F7 intercept."""
+    hooks_mod, actions_mod = _load_plugin()
+    real_f7 = hooks_mod._try_f7_primary_intercept
+    menu = tmp_path / "menu.json"
+    menu.write_text(json.dumps({"items": [
+        {"name": n, "available": True}
+        for n in ("Veg Biryani", "Paneer Butter Masala", "Chicken Biryani", "Upma")
+    ]}), encoding="utf-8")
+    monkeypatch.setattr(actions_mod, "MENU_PATH", menu)
+    if allowlist is None:
+        monkeypatch.delenv("CATERING_EXPLICIT_QTY_ALLOWLIST", raising=False)
+    else:
+        monkeypatch.setenv("CATERING_EXPLICIT_QTY_ALLOWLIST", allowlist)
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("awaiting_final_approval", "F0230"),
+              open_lead=open_lead, **kw)
+    return hooks_mod, actions_mod, s, real_f7
+
+
+def _assert_fallthrough(hooks_mod, s, out):
+    assert out is hooks_mod._GATE_FALLTHROUGH
+    assert s.f7_calls == [] and s.sent == [] and s.audits == []
+
+
+def test_open_lead_explicit_qty_escapes_to_f7_not_flyer(monkeypatch, tmp_path):
+    hooks_mod, actions_mod, s, _ = _wire_explicit(monkeypatch, tmp_path, open_lead=_lead("L0021"))
+    assert actions_mod.classify_catering(EXPLICIT_ORDER)[0] is False  # precondition
+    out = hooks_mod._try_flyer_catering_escape_gate(EXPLICIT_ORDER, CHAT, _event())
+    assert out["action"] == "skip" and "F7" in out["reason"]
+    assert len(s.f7_calls) == 1 and s.f7_calls[0]["allow_new_lead"] is True
+    assert _reasons(s) == ["flyer_active_project_open_lead_catering_escape"]
+    assert "escape=explicit_qty" in s.audits[0]["detail"]
+    assert s.update_calls == [] and s.flyer_arm_calls == []
+
+
+def test_open_lead_explicit_qty_escape_reaches_explicit_arm(monkeypatch, tmp_path):
+    """Whole path: the REAL F7 intercept, entered from the gate with
+    allow_new_lead=True and an open lead, reaches the explicit-quantity arm."""
+    hooks_mod, actions_mod, s, real_f7 = _wire_explicit(
+        monkeypatch, tmp_path, open_lead=_lead("L0021"))
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", real_f7)
+    arm_calls = []
+
+    def _arm(text, chat_id, event, *, active_lead, message_id, phone=None):
+        arm_calls.append((text, active_lead["lead_id"], phone))
+        return {"action": "skip", "reason": "cf-router F7 explicit quantities: arm"}
+    monkeypatch.setattr(hooks_mod, "_try_explicit_qty_intercept", _arm)
+    out = hooks_mod._try_flyer_catering_escape_gate(EXPLICIT_ORDER, CHAT, _event())
+    assert arm_calls == [(EXPLICIT_ORDER, "L0021", PHONE)]
+    assert out == {"action": "skip", "reason": "cf-router F7 explicit quantities: arm"}
+    assert s.update_calls == [] and s.flyer_arm_calls == []
+
+
+def test_open_lead_explicit_qty_not_allowlisted_falls_through(monkeypatch, tmp_path):
+    hooks_mod, _, s, _ = _wire_explicit(monkeypatch, tmp_path, allowlist=None,
+                                        open_lead=_lead("L0021"))
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        EXPLICIT_ORDER, CHAT, _event()))
+
+
+def test_explicit_qty_without_open_lead_falls_through(monkeypatch, tmp_path):
+    hooks_mod, _, s, _ = _wire_explicit(monkeypatch, tmp_path, open_lead=None)
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        EXPLICIT_ORDER, CHAT, _event()))
+
+
+def test_explicit_qty_with_unmatched_item_falls_through(monkeypatch, tmp_path):
+    hooks_mod, actions_mod, s, _ = _wire_explicit(monkeypatch, tmp_path, open_lead=_lead("L0021"))
+    text = "3 trays of lasagna, 2 Upma"
+    ext = actions_mod.extract_explicit_line_items_from_menu(text)
+    assert ext.matched and ext.unmatched  # precondition: one of each
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        text, CHAT, _event()))
+
+
+@pytest.mark.parametrize("text", [
+    "10 Veg Biryani, 5 Paneer Butter Masala on the flyer",
+    "update the poster with 10 Veg Biryani",
+])
+def test_explicit_qty_flyer_edit_falls_through(monkeypatch, tmp_path, text):
+    """A flyer edit carrying quantities stays on the flyer path. The extractor is
+    forced to a FULL match so only the flyer-signal clause can stop the escape
+    (the real extractor already leaves flyer words unmatched)."""
+    hooks_mod, actions_mod, s, _ = _wire_explicit(monkeypatch, tmp_path, open_lead=_lead("L0021"))
+    assert hooks_mod._flyer_edit_signal_present(text, has_media=False)
+    full = actions_mod.extract_explicit_line_items_from_menu(EXPLICIT_ORDER)
+    assert full.matched and not full.unmatched
+    monkeypatch.setattr(actions_mod, "extract_explicit_line_items_from_menu", lambda t: full)
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        text, CHAT, _event()))
+
+
+def test_explicit_qty_extractor_raises_falls_through(monkeypatch, tmp_path):
+    hooks_mod, actions_mod, s, _ = _wire_explicit(monkeypatch, tmp_path, open_lead=_lead("L0021"))
+
+    def _boom(text):
+        raise RuntimeError("menu exploded")
+    monkeypatch.setattr(actions_mod, "extract_explicit_line_items_from_menu", _boom)
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        EXPLICIT_ORDER, CHAT, _event()))
+
+
+def test_explicit_qty_not_finalize_eligible_lead_falls_through(monkeypatch, tmp_path):
+    """A QUALIFYING lead: F7's explicit arm would decline, so do not escape."""
+    hooks_mod, _, s, _ = _wire_explicit(monkeypatch, tmp_path,
+                                        open_lead=_lead("L0021", status="QUALIFYING"))
+    _assert_fallthrough(hooks_mod, s, hooks_mod._try_flyer_catering_escape_gate(
+        EXPLICIT_ORDER, CHAT, _event()))
