@@ -958,6 +958,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             quote_echo_result = _try_flyer_quote_echo_guard(text, chat_id, event, media_path)
             if quote_echo_result is not None:
                 return quote_echo_result
+            # A weak catering question ("Do you do catering?") while a flyer
+            # intake is in progress: ask flyer-vs-catering (customer) or yield
+            # (owner) instead of letting intake / the intake-status project arms
+            # consume it. Fall-through for everything else, including strong
+            # catering and any sender with an open catering lead.
+            intake_catering_result = _try_flyer_intake_catering_question_gate(
+                text, chat_id, event, media_path, classify_fn=classify_catering_memo)
+            if intake_catering_result is not _GATE_FALLTHROUGH:
+                return intake_catering_result
             if fb_converse:
                 # Yield an in-progress intake follow-up to the LLM; record a
                 # marker only when a live intake session actually exists for this
@@ -1467,6 +1476,29 @@ def _try_revenue_route_clarification_choice(
     )
 
     if choice == "flyer":
+        if "flyer_catering_intent:intake_catering_question" in (pending.get("signals") or []):
+            # The question was asked mid-intake: "flyer" means "carry on with my
+            # flyer request". The stored text IS the catering question, so it is
+            # NOT replayed (intake would take it as an answer, or an intake-ready
+            # project would start generating from it) and no NEW project is made
+            # (force_new would orphan the in-progress one). Acknowledge only.
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id,
+                "Flyer Studio\n------------\nGot it - your flyer request is still open. "
+                "Please send the next flyer detail, or the full flyer request in one message.",
+                action_context=build_action_context(
+                    action_id="flyer.routing.revenue_route_clarification",
+                    is_regulated_action=False,
+                ),
+            )
+            actions.audit_intercepted(
+                reason="revenue_route_clarification_sent",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(f"choice=flyer; intake_continue_ack=true; "
+                        f"ack_message_id={mid}; ack_error={err[:300]}"),
+            )
+            return {"action": "skip", "reason": "cf-router flyer intake continue acknowledged"}
         if flyer_generation_enabled:
             return _try_flyer_primary_intercept(original_text, chat_id, original_event, force_new=True)
         if flyer_workflow_enabled:
@@ -6694,6 +6726,73 @@ def _try_flyer_catering_escape_gate(
                 "reason": f"cf-router catering escape gate: {plan[0]} failed after dispatch"}
 
 
+# Active-project statuses in which a flyer request is still being collected.
+# Shared by the two intake arms of `_try_flyer_active_project_intercept` (start
+# generation / "I have your flyer request open") and the intake catering-question
+# gate below, so all three agree on what "intake in progress" means.
+_FLYER_INTAKE_PROJECT_STATUSES = frozenset(
+    {"intake_started", "collecting_required_info", "awaiting_assets"})
+
+
+def _try_flyer_intake_catering_question_gate(
+    text: str, chat_id: str, event: Any, media_path: Optional[str] = None,
+    *, classify_fn: Optional[Callable[[str], tuple]] = None,
+) -> Any:
+    """A weak catering question ("Do you do catering?") from a sender with a
+    flyer intake in progress must not be consumed by Flyer intake — fed to
+    `trigger_flyer_intake` as a guided answer, or taken by the intake-status
+    active-project arms (which start generation / send the canned "request
+    open" reply). The escape gate only escapes STRONG catering, so this weak
+    shape fell through to those arms.
+
+    Fires only when ALL hold (cheapest first): classify_catering is NOT catering
+    but carries `primary:catering`; no explicit flyer edit signal; NO open
+    catering lead (R2B-1 / escape gate / F7 keep precedence there); and an
+    intake session exists OR the active project is in an intake status.
+    Strong catering never reaches here (byte-identical existing paths).
+
+    Same return convention as `_try_flyer_catering_escape_gate`:
+      _GATE_FALLTHROUGH — not mine; dispatch continues unchanged (also on ANY
+                          error while deciding — nothing has been sent).
+      dict              — customer: one flyer-vs-catering clarification sent.
+      None              — owner (`is_owner_chat` authority, never the scalar
+                          role): yield the turn to the LLM, audited.
+    """
+    try:
+        is_catering, signals = (classify_fn or actions.classify_catering)(text)
+        if is_catering or "primary:catering" not in signals:
+            return _GATE_FALLTHROUGH
+        if _flyer_edit_signal_present(text, has_media=bool(media_path)):
+            return _GATE_FALLTHROUGH
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        if actions.find_active_catering_lead_by_sender(phone, chat_id) is not None:
+            return _GATE_FALLTHROUGH
+        intake_session = actions.find_flyer_intake_session_by_sender(phone, chat_id)
+        active_project = None
+        if not intake_session:
+            active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
+            if str((active_project or {}).get("status") or "") not in _FLYER_INTAKE_PROJECT_STATUSES:
+                return _GATE_FALLTHROUGH
+        project_id = str((active_project or {}).get("project_id") or "")
+        status = str((active_project or {}).get("status")
+                     or (intake_session or {}).get("status") or "")
+        is_owner = _owner_authority_resolver(chat_id)()
+    except Exception:  # noqa: BLE001 — undecidable: keep the existing path
+        return _GATE_FALLTHROUGH
+    if is_owner:
+        _audit_flyer_owner_yield(
+            chat_id=chat_id, project_id=project_id,
+            message_id=_extract_message_id(event, chat_id, text),
+            status=status, role=role, yield_reason="intake_catering_question",
+        )
+        return None
+    return _send_flyer_catering_intent_clarification(
+        text=text, chat_id=chat_id, event=event,
+        project_id=project_id, status=status, role=role,
+        cause="intake_catering_question",
+    )
+
+
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
@@ -6919,7 +7018,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ),
         }
     if (
-        status in {"intake_started", "collecting_required_info", "awaiting_assets"}
+        status in _FLYER_INTAKE_PROJECT_STATUSES
         and actions.flyer_project_has_required_fields(active_project)
         and not active_project.get("concepts")
     ):
@@ -7578,7 +7677,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer active: revision captured for {project_id}"}
 
-    if status in {"intake_started", "collecting_required_info", "awaiting_assets"} and body:
+    if status in _FLYER_INTAKE_PROJECT_STATUSES and body:
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id,
             (
