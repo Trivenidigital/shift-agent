@@ -56,14 +56,14 @@ _PREMIUM_STYLE = (
     "appetizing colours, professional food styling, generous negative space, "
     "portrait composition suitable as a poster background."
 )
-# Composition guidance (C3): bias the model toward overlay-safe layouts so the
-# deterministic text (headline/offer/items/footer) lands on clean areas. Still
-# textless — this directs WHERE the food sits, never adds copy.
+# Reuse the continuous-photograph guidance from render.py. The compositor owns
+# copy placement; reserved regions in a photo prompt produce visible bands.
 _COMPOSITION = (
-    "Composition: keep the food primarily in the centre / mid-background; leave the "
-    "upper third and a lower band as clean, uncluttered negative space (soft "
-    "out-of-focus backdrop or empty table surface) as overlay-safe zones for poster "
-    "text."
+    "Composition: one continuous edge-to-edge food photograph, captured as a single exposure "
+    "through one camera lens, with coherent perspective, lighting and depth of field. "
+    "Keep the food prominent and create natural soft negative space through an out-of-focus "
+    "backdrop and a gentle vignette. No hard horizontal boundaries, no header/footer strips, "
+    "no blank panels, no letterbox bands, and no advertisement layout."
 )
 
 # Only these descriptive fact ids feed scene SELECTION (which fixed template to

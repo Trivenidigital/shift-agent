@@ -144,3 +144,68 @@ def test_nonuniform_item_price_mismatch_cannot_be_cleared_by_reread(tmp_path, mo
 def test_inline_price_correct_item_is_not_blocked(row):
     assert qa._near_duplicate_item_blockers(_reread_project(), row) == []
 
+
+
+@pytest.mark.parametrize("secondary, passed", [
+    ("Mysoore Pak\n$4.99\n+15550100001", True),
+    ("Mysore Pak\n$4.99\n+15550100001", False),
+    ("Mysoore Pak\nOther Kitchen\n$4.99\n+15550100001", False),
+])
+def test_same_bulleted_item_brand_candidate_gets_neutral_reread(tmp_path, monkeypatch, secondary, passed):
+    from schemas import FlyerReferenceExtraction
+    project = _reread_project()
+    project.reference_extractions = [FlyerReferenceExtraction(asset_id="R1", role="inspiration")]
+    primary = "• Mysore Pak\n$4.99\n+15550100001"
+    assert len(qa._transcript_blockers(project, tmp_path / "image.png", primary, [])) == 2
+    artifact = tmp_path / "image.png"
+    artifact.write_bytes(b"image")
+    calls = []
+    def vision(*args, **kwargs):
+        calls.append(kwargs["model"])
+        return primary if len(calls) == 1 else secondary, "openrouter", "ocr_vision", []
+    monkeypatch.setattr(qa, "_vision_text", vision)
+    report = qa.run_visual_qa(project, artifact, output_format="portrait", allow_sidecar=False)
+    assert calls == [qa.VISION_QA_MODEL, qa.REGIONAL_QA_MODEL]
+    assert (report.status == "passed") == passed, report.blockers
+
+
+@pytest.mark.parametrize("extra", ["Other Kitchen", "Mysore Pak Foods", "Brand: Mysore Pak", "$9.99", "+15550999999", "• Mysore Pak"])
+def test_bulleted_candidate_does_not_clear_unrelated_primary_evidence(tmp_path, monkeypatch, extra):
+    from schemas import FlyerReferenceExtraction
+    project = _reread_project()
+    project.reference_extractions = [FlyerReferenceExtraction(asset_id="R1", role="inspiration")]
+    artifact = tmp_path / "image.png"
+    artifact.write_bytes(b"image")
+    calls = []
+    def vision(*args, **kwargs):
+        calls.append(kwargs["model"])
+        return "• Mysore Pak\n$4.99\n+15550100001\n" + extra, "openrouter", "ocr_vision", []
+    monkeypatch.setattr(qa, "_vision_text", vision)
+    report = qa.run_visual_qa(project, artifact, output_format="portrait", allow_sidecar=False)
+    assert len(calls) == 1
+    assert report.status == "failed"
+
+
+@pytest.mark.parametrize("identity_kind", ["source", "organization"])
+def test_near_item_candidate_cannot_hide_known_or_organization_brand(tmp_path, monkeypatch, identity_kind):
+    from schemas import FlyerReferenceExtraction, FlyerSourceContract
+    project = _reread_project()
+    if identity_kind == "organization":
+        project.locked_facts[0].value = "Mysoore Market"
+        observed = "Mysore Market"
+        contract = None
+    else:
+        observed = "Mysore Pak"
+        contract = FlyerSourceContract(source_business_names=[observed])
+    project.reference_extractions = [FlyerReferenceExtraction(asset_id="R1", role="inspiration", source_contract=contract)]
+    artifact = tmp_path / "image.png"
+    artifact.write_bytes(b"image")
+    calls = []
+    def vision(*args, **kwargs):
+        calls.append(kwargs["model"])
+        return "• " + observed + "\n$4.99\n+15550100001", "openrouter", "ocr_vision", []
+    monkeypatch.setattr(qa, "_vision_text", vision)
+    report = qa.run_visual_qa(project, artifact, output_format="portrait", allow_sidecar=False)
+    assert len(calls) == 1
+    assert any("near-duplicate item" in b for b in report.blockers)
+    assert any("wrong business/brand" in b for b in report.blockers)
