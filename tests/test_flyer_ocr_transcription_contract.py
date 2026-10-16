@@ -59,7 +59,7 @@ def _reread_project():
         original_message_id="ocr-test", raw_request="Snack menu",
         locked_facts=[FlyerLockedFact(fact_id=k, label=k, value=v, source="customer_text", required=True)
                       for k, v in [("item:0:name", "Mysoore Pak"), ("item:0:price", "$4.99"),
-                                   ("contact_phone", "+15550100001")]])
+                                   ("contact_phone", "+15550100001"), ("pricing_structure", "$4.99")]])
 
 
 @pytest.mark.parametrize("secondary, expected", [
@@ -106,4 +106,41 @@ def test_reread_never_runs_for_clean_sidecar_or_regional(tmp_path, monkeypatch, 
         artifact.with_suffix(".png.ocr.txt").write_text(text)
     qa.run_visual_qa(_reread_project(), artifact_path=artifact, output_format="portrait", allow_sidecar=mode == "sidecar")
     assert calls == ([] if mode == "sidecar" else [qa.REGIONAL_QA_MODEL if mode == "regional" else qa.VISION_QA_MODEL])
+
+
+
+@pytest.mark.parametrize("adverse", ["\n$9.99", "\n+15550999999", "\nMysoore Pak\nMysoore Pak", "\nMysore Pak"])
+def test_reread_cannot_erase_primary_adverse_evidence(tmp_path, monkeypatch, adverse):
+    artifact = tmp_path / "image.png"
+    artifact.write_bytes(b"image")
+    reads = iter(["Mysore Pak\n$4.99\n+15550100001" + adverse,
+                  "Mysoore Pak $4.99\n+15550100001"])
+    monkeypatch.setattr(qa, "_vision_text", lambda *a, **kw: (next(reads), "openrouter", "ocr_vision", []))
+    report = qa.run_visual_qa(_reread_project(), artifact, output_format="portrait", allow_sidecar=False)
+    assert report.status == "failed", report
+
+
+@pytest.mark.parametrize("row", ["Mysore Pak $4.99", "Mysore Pak ........ $4.99"])
+def test_inline_price_does_not_hide_wrong_item_spelling(row):
+    assert any("near-duplicate item" in b for b in qa._near_duplicate_item_blockers(_reread_project(), row))
+
+
+def test_nonuniform_item_price_mismatch_cannot_be_cleared_by_reread(tmp_path, monkeypatch):
+    artifact = tmp_path / "image.png"
+    artifact.write_bytes(b"image")
+    project = _reread_project()
+    project.locked_facts = [f for f in project.locked_facts if f.fact_id != "pricing_structure"]
+    calls = []
+    def vision(*args, **kwargs):
+        calls.append(kwargs["model"])
+        return "Mysore Pak\n$4.99\n+15550100001", "openrouter", "ocr_vision", []
+    monkeypatch.setattr(qa, "_vision_text", vision)
+    report = qa.run_visual_qa(project, artifact, output_format="portrait", allow_sidecar=False)
+    assert len(calls) == 1
+    assert any("item price mismatch" in b for b in report.blockers)
+
+
+@pytest.mark.parametrize("row", ["Mysoore Pak $4.99", "Mysoore Pak ........ $4.99"])
+def test_inline_price_correct_item_is_not_blocked(row):
+    assert qa._near_duplicate_item_blockers(_reread_project(), row) == []
 

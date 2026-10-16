@@ -1093,6 +1093,9 @@ def _near_duplicate_item_blockers(project: FlyerProject, raw_text: str) -> list[
     )
     for raw_line in (raw_text or "").splitlines():
         line = re.sub(r"^[\s\-*•★●▪‣➤>]+", "", raw_line).strip()
+        # Currency at the end of a menu row is checked separately by price gates.
+        # It must not conceal an otherwise visible misspelled item name.
+        line = re.sub(r"[\s.·…:–—-]*\$\s*\d[\d,]*(?:\.\d{1,2})?\s*$", "", line).strip()
         if not line or skip_line.search(line):
             # Keep exact menu-item lines even if they contain "snack/special" etc.
             norm_for_exact = re.sub(r"[^a-z0-9]+", " ", line.casefold()).strip()
@@ -1120,6 +1123,8 @@ def _near_duplicate_item_blockers(project: FlyerProject, raw_text: str) -> list[
                 if key not in seen_bad:
                     seen_bad.add(key)
                     blockers.append(f"near-duplicate item visible: expected {expected_value} but saw {line}")
+                elif f"duplicate item visible: {line}" not in blockers:
+                    blockers.append(f"duplicate item visible: {line}")
                 break
     for expected_value, expected_norm in expected:
         if exact_counts.get(expected_norm, 0) > 1:
@@ -2112,57 +2117,12 @@ def _extraneous_token_blockers(project: FlyerProject, extracted_text: str,
     return blockers
 
 
-def run_visual_qa(
-    project: FlyerProject,
-    artifact_path: Path | str,
-    *,
-    output_format: str,
-    asset_id: str = "",
-    allow_sidecar: bool | None = None,
-) -> FlyerVisualQAReport:
+def _transcript_blockers(
+    project: FlyerProject, artifact_path: Path | str, extracted_text: str, provider_notes: list[str],
+) -> list[str]:
+    """Apply the same strict gates to either independent OCR observation."""
     artifact = Path(artifact_path)
-    if allow_sidecar is None:
-        allow_sidecar = os.environ.get("FLYER_QA_ALLOW_SIDECAR") == "1"
-    extracted_text, provider, qa_source = _sidecar_text(artifact, allow_sidecar=allow_sidecar)
-    provider_notes: list[str] = []
-    read_observations: list[str] = []
-    if not extracted_text:
-        ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
-        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
-        if (extracted_text and qa_source == "ocr_vision"
-                and ocr_model != REGIONAL_QA_MODEL
-                and _near_duplicate_item_blockers(project, extracted_text)):
-            # One independent literal read, with no expected copy in the request.
-            # Replace the whole observation, never patch a name to match facts;
-            # every strict gate below still evaluates the resulting transcript.
-            reread_text, reread_provider, reread_source, reread_notes = _vision_text(
-                artifact, model=REGIONAL_QA_MODEL)
-            if reread_text.strip() and reread_provider != "unavailable":
-                extracted_text, provider, qa_source, provider_notes = (
-                    reread_text, reread_provider, reread_source, reread_notes)
-                read_observations.append(
-                    f"OCR re-verification: {REGIONAL_QA_MODEL}; primary: {ocr_model}")
-            else:
-                read_observations.append(
-                    f"OCR re-verification unavailable: {REGIONAL_QA_MODEL}; retained primary: {ocr_model}")
     blockers: list[str] = []
-    if not extracted_text:
-        _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
-        return FlyerVisualQAReport(
-            project_id=project.project_id,
-            asset_id=asset_id,
-            artifact_path=str(artifact),
-            artifact_sha256=sha256_file(artifact),
-            project_version=project.version,
-            output_format=output_format,
-            provider=provider,
-            qa_source=qa_source,
-            status="provider_unavailable",
-            blockers=_early_blockers,
-            severity=classify_qa_severity(_early_blockers, project=project),
-            extracted_text="",
-            checked_at=datetime.now(timezone.utc),
-        )
     normalized = _normalize_text_for_match(extracted_text)
     if PLACEHOLDER_RE.search(extracted_text):
         blockers.append("placeholder text is visible in generated flyer")
@@ -2250,6 +2210,67 @@ def run_visual_qa(
                 continue
             if _text_value_present_in(normalized, normalized_forbidden):
                 blockers.append(f"replaced source text still visible: {forbidden}")
+    return blockers
+
+
+def run_visual_qa(
+    project: FlyerProject,
+    artifact_path: Path | str,
+    *,
+    output_format: str,
+    asset_id: str = "",
+    allow_sidecar: bool | None = None,
+) -> FlyerVisualQAReport:
+    artifact = Path(artifact_path)
+    if allow_sidecar is None:
+        allow_sidecar = os.environ.get("FLYER_QA_ALLOW_SIDECAR") == "1"
+    extracted_text, provider, qa_source = _sidecar_text(artifact, allow_sidecar=allow_sidecar)
+    provider_notes: list[str] = []
+    read_observations: list[str] = []
+    if not extracted_text:
+        ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
+        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
+        primary_blockers = _transcript_blockers(project, artifact, extracted_text, provider_notes) if extracted_text else []
+        # Re-reading spelling cannot erase any other adverse primary evidence.
+        spelling_only = bool(primary_blockers) and all(
+            b.startswith("near-duplicate item visible:")
+            or re.fullmatch(r"missing required visible fact: item:\d+:name", b)
+            for b in primary_blockers)
+        if (extracted_text and qa_source == "ocr_vision"
+                and ocr_model != REGIONAL_QA_MODEL and spelling_only
+                and any(b.startswith("near-duplicate item visible:") for b in primary_blockers)):
+            # One independent literal read, with no expected copy in the request.
+            # Replace the whole observation, never patch a name to match facts;
+            # every strict gate below still evaluates the resulting transcript.
+            reread_text, reread_provider, reread_source, reread_notes = _vision_text(
+                artifact, model=REGIONAL_QA_MODEL)
+            if reread_text.strip() and reread_provider != "unavailable":
+                extracted_text, provider, qa_source, provider_notes = (
+                    reread_text, reread_provider, reread_source, reread_notes)
+                read_observations.append(
+                    f"OCR re-verification: {REGIONAL_QA_MODEL}; primary: {ocr_model}")
+            else:
+                read_observations.append(
+                    f"OCR re-verification unavailable: {REGIONAL_QA_MODEL}; retained primary: {ocr_model}")
+    blockers: list[str] = []
+    if not extracted_text:
+        _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
+        return FlyerVisualQAReport(
+            project_id=project.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact),
+            artifact_sha256=sha256_file(artifact),
+            project_version=project.version,
+            output_format=output_format,
+            provider=provider,
+            qa_source=qa_source,
+            status="provider_unavailable",
+            blockers=_early_blockers,
+            severity=classify_qa_severity(_early_blockers, project=project),
+            extracted_text="",
+            checked_at=datetime.now(timezone.utc),
+        )
+    blockers = _transcript_blockers(project, artifact, extracted_text, provider_notes)
     return FlyerVisualQAReport(
         project_id=project.project_id,
         asset_id=asset_id,
