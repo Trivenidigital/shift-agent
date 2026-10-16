@@ -4122,6 +4122,82 @@ def _has_standalone_approval_code(body: str) -> bool:
     )
 
 
+def _owner_authority_resolver(chat_id: str) -> Callable[[], bool]:
+    """Lazy owner-authority check for the flyer owner yields. Owner authority
+    comes from the `is_owner_chat` chokepoint (same check F8 uses), NOT `role`:
+    that is identify-sender's legacy scalar, which reads "employee" for a
+    dual-role (employee+owner) principal. Resolved at most once, and only when
+    a yield condition already holds."""
+    cached: list[bool] = []
+
+    def _resolve() -> bool:
+        if not cached:
+            cached.append(bool(actions.is_owner_chat(chat_id)))
+        return cached[0]
+
+    return _resolve
+
+
+def _is_owner_approval_code_command(body: str) -> bool:
+    """F8's own decision grammar: a standalone 5-char code token (`_CODE_PATTERN`
+    alone also matches inside 6-digit hex colours, "#FFAA33" -> "FFAA3") AND an
+    F8 approve/reject verb (a bare all-caps hashtag such as "#PARTY" is flyer
+    text)."""
+    return _has_standalone_approval_code(body) and bool(
+        _VERB_APPROVE.search(body) or _VERB_REJECT.search(body)
+    )
+
+
+def _is_non_revision_catering_clarification(
+    body: str,
+    *,
+    revision_requires_clarification: bool,
+    update_patch: dict,
+    pending_confirmation_message: str,
+    active_project: dict,
+    media_path: Optional[str],
+) -> bool:
+    """True when update-flyer-project answered `body` with a generic, no-change
+    clarification that wrote nothing, and `body` is a catering question rather
+    than a flyer edit. Absence of flyer signals is NOT enough (terse owner
+    revisions like "25th" or "redo" carry none): this also needs POSITIVE
+    catering evidence from the deployed `classify_catering` - its
+    `primary:catering` signal (the word catering/caterer), present even when the
+    inbound is too thin for a lead. The script's generic clarification path
+    writes state solely when it overwrote a pending revision confirmation, so a
+    project carrying one never qualifies; any confirmation-type reply is still
+    sent. Owner authority is checked separately by the caller."""
+    return bool(
+        revision_requires_clarification
+        and update_patch
+        and not pending_confirmation_message.strip()
+        and not any(
+            update_patch.get(flag)
+            for flag in ("changed", "visual_only", "ambiguous", "already_applied")
+        )
+        and not active_project.get("pending_revision_confirmation")
+        and not _looks_like_active_flyer_revision(body)
+        and not _flyer_edit_signal_present(body, has_media=bool(media_path))
+        and "primary:catering" in actions.classify_catering(body)[1]
+    )
+
+
+def _audit_flyer_owner_yield(
+    *, chat_id: str, project_id: str, message_id: str, status: str, role: str, yield_reason: str,
+) -> None:
+    domain = "domain=catering; " if yield_reason == "non_revision_clarification" else ""
+    actions.audit_intercepted(
+        reason="flyer_active_project_bypassed",
+        chat_id=chat_id,
+        subprocess_rc=0,
+        detail=(
+            f"project_id={project_id}; message_id={message_id}; owner_yielded=true; "
+            f"yield_reason={yield_reason}; {domain}status={status}; "
+            f"owner_capability=true; sender_role={role}"
+        ),
+    )
+
+
 def _looks_like_active_flyer_revision(body: str) -> bool:
     normalized = " ".join(actions.flyer_visible_message_text(body).split())
     return (
@@ -7033,6 +7109,16 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             )
             return {"action": "skip",
                     "reason": f"cf-router flyer early approval progress for {project_id}"}
+        # Owner yields (2026-10-16, F0231): the same two yields as the revision
+        # fallback below — a queued manual edit must not swallow an owner's
+        # declined `#CODE approve` or catering question as an edit correction.
+        _owner_authority = _owner_authority_resolver(chat_id)
+        if _is_owner_approval_code_command(body) and _owner_authority():
+            _audit_flyer_owner_yield(
+                chat_id=chat_id, project_id=project_id, message_id=message_id,
+                status=status, role=role, yield_reason="approval_code_token",
+            )
+            return None
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,
@@ -7041,16 +7127,34 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         revision_requires_clarification = False
         clarification_reason = ""
         pending_confirmation_message = ""
+        update_patch: dict = {}
         try:
             import json
             update_doc = json.loads(detail)
             patch = update_doc.get("revision_patch") or {}
+            update_patch = patch if isinstance(patch, dict) else {}
             revision_requires_clarification = bool(update_doc.get("revision_requires_clarification"))
             clarification_reason = str(patch.get("unresolved_reason") or "I could not match that change to the queued edit.")
             pending_confirmation_message = str(patch.get("pending_confirmation_message") or "")
         except Exception:
             revision_requires_clarification = not ok
             clarification_reason = detail[:180] or "I could not save that correction."
+        # update-flyer-project's generic clarification return writes state only
+        # when it overwrote a pending revision confirmation; the predicate
+        # refuses that case, so a yield here never strands a write.
+        if _is_non_revision_catering_clarification(
+            body,
+            revision_requires_clarification=revision_requires_clarification,
+            update_patch=update_patch,
+            pending_confirmation_message=pending_confirmation_message,
+            active_project=active_project,
+            media_path=media_path,
+        ) and _owner_authority():
+            _audit_flyer_owner_yield(
+                chat_id=chat_id, project_id=project_id, message_id=message_id,
+                status=status, role=role, yield_reason="non_revision_clarification",
+            )
+            return None
         if revision_requires_clarification:
             if pending_confirmation_message.strip():
                 reply = pending_confirmation_message.strip()
@@ -7326,35 +7430,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         # Owner yield (2026-10-15, F0229): an owner `#CODE approve` that the F8
         # arm declined (unknown / stale / colliding code) falls through to here.
         # It is an approval command, not a flyer edit — let normal routing / the
-        # LLM handle it, as F8 intends. Only F8's own decision grammar counts: a
-        # standalone 5-char code token (`_CODE_PATTERN` alone also matches inside
-        # 6-digit hex colours, "#FFAA33" -> "FFAA3") AND an F8 approve/reject
-        # verb (a bare all-caps hashtag such as "#PARTY" is flyer text).
-        # Owner authority comes from the `is_owner_chat` chokepoint (same check
-        # F8 uses), NOT `role`: that is identify-sender's legacy scalar, which
-        # reads "employee" for a dual-role (employee+owner) principal. Resolved
-        # lazily, at most once, and only when a yield condition already holds.
-        owner_authority: list[bool] = []
-
-        def _owner_authority() -> bool:
-            if not owner_authority:
-                owner_authority.append(bool(actions.is_owner_chat(chat_id)))
-            return owner_authority[0]
-
-        if (
-            _has_standalone_approval_code(body)
-            and (_VERB_APPROVE.search(body) or _VERB_REJECT.search(body))
-            and _owner_authority()
-        ):
-            actions.audit_intercepted(
-                reason="flyer_active_project_bypassed",
-                chat_id=chat_id,
-                subprocess_rc=0,
-                detail=(
-                    f"project_id={project_id}; message_id={message_id}; owner_yielded=true; "
-                    f"yield_reason=approval_code_token; status={status}; "
-                    f"owner_capability=true; sender_role={role}"
-                ),
+        # LLM handle it, as F8 intends.
+        _owner_authority = _owner_authority_resolver(chat_id)
+        if _is_owner_approval_code_command(body) and _owner_authority():
+            _audit_flyer_owner_yield(
+                chat_id=chat_id, project_id=project_id, message_id=message_id,
+                status=status, role=role, yield_reason="approval_code_token",
             )
             return None
         ok, detail = actions.invoke_update_flyer_project(
@@ -7380,38 +7461,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         # Owner yield (2026-10-15, F0229): an owner question that merely lands on
         # an open flyer project ("What catering approvals are pending?") came back
         # as an unmatched revision. Do not answer it with a flyer clarification —
-        # yield so it reaches normal routing / the LLM. Absence of flyer signals
-        # is NOT enough (terse owner revisions like "25th" or "redo" carry none):
-        # the yield also needs POSITIVE catering evidence from the deployed
-        # `classify_catering` — its `primary:catering` signal (the word
-        # catering/caterer), present even when the inbound is too thin for a
-        # lead. Only when the script wrote nothing: its generic clarification
-        # path writes state solely when it
-        # overwrote a pending revision confirmation, so a project carrying one is
-        # never yielded. Any confirmation-type reply is still sent.
-        if (
-            revision_requires_clarification
-            and update_patch
-            and not pending_confirmation_message.strip()
-            and not any(
-                update_patch.get(flag)
-                for flag in ("changed", "visual_only", "ambiguous", "already_applied")
-            )
-            and not active_project.get("pending_revision_confirmation")
-            and not _looks_like_active_flyer_revision(body)
-            and not _flyer_edit_signal_present(body, has_media=bool(media_path))
-            and "primary:catering" in actions.classify_catering(body)[1]
-            and _owner_authority()
-        ):
-            actions.audit_intercepted(
-                reason="flyer_active_project_bypassed",
-                chat_id=chat_id,
-                subprocess_rc=0,
-                detail=(
-                    f"project_id={project_id}; message_id={message_id}; owner_yielded=true; "
-                    f"yield_reason=non_revision_clarification; domain=catering; status={status}; "
-                    f"owner_capability=true; sender_role={role}"
-                ),
+        # yield so it reaches normal routing / the LLM (the predicate documents
+        # the catering-evidence and nothing-written conditions).
+        if _is_non_revision_catering_clarification(
+            body,
+            revision_requires_clarification=revision_requires_clarification,
+            update_patch=update_patch,
+            pending_confirmation_message=pending_confirmation_message,
+            active_project=active_project,
+            media_path=media_path,
+        ) and _owner_authority():
+            _audit_flyer_owner_yield(
+                chat_id=chat_id, project_id=project_id, message_id=message_id,
+                status=status, role=role, yield_reason="non_revision_clarification",
             )
             return None
         # Reload the project the revision was actually applied to. When the
