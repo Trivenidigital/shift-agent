@@ -70,6 +70,9 @@ EXPECTED_OTHER_ENABLES = sorted([
     # active in production; `enable --now` is idempotent, so the deploy line reproduces
     # the live state. Nothing above this line was modified.
     "systemctl enable --now hermes-version-check.timer 2>/dev/null || true",
+    # Added deliberately by PR2 Fleet Sentinel (2026-10-23): daily report-only
+    # readiness timer, enabled beside send-routing-accuracy-summary.timer.
+    "systemctl enable --now fleet-readiness-report.timer 2>/dev/null || true",
 ])
 
 

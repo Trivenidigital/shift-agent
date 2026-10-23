@@ -418,6 +418,14 @@ RECEIPT_EOF
     else
         rm -f /opt/shift-agent/approval_code_pools.py
     fi
+    # PR2 Fleet Sentinel: read-only per-agent readiness model imported by
+    # /usr/local/bin/fleet-readiness-report through its /opt/shift-agent
+    # sys.path insert. Guarded for rollback compatibility with older tarballs.
+    if [ -f src/platform/fleet_readiness.py ]; then
+        install -m 644 src/platform/fleet_readiness.py /opt/shift-agent/fleet_readiness.py
+    else
+        rm -f /opt/shift-agent/fleet_readiness.py
+    fi
     # PR-R2A: durable Branch-B amendment capture (sidecar store) — imported by the
     # cf-router plugin's F7 primary-mode follow-up-suppressed arm. WITHOUT this,
     # `import catering_amendments` fails at plugin load -> the whole cf-router plugin
@@ -1580,6 +1588,10 @@ PY
     systemctl enable --now catering-owner-action-watchdog.service 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
+    # PR2 Fleet Sentinel: daily per-agent readiness report (report-only; units
+    # installed by the shift *.service/*.timer glob above). DAILY cadence is
+    # pinned by tests/test_fleet_readiness_units.py — see the timer comment.
+    systemctl enable --now fleet-readiness-report.timer 2>/dev/null || true
     systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
     # Platform alert-integrity watchdog (census A3/C3): decisions.log freshness
     # (§12a hole) + notify-failed.log dead-letter growth (§12b). Idempotent on

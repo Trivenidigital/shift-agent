@@ -902,6 +902,7 @@ smoke_enabled_units=(
     prune-expense-receipts.timer
     check-compliance-deadlines.timer
     hermes-version-check.timer
+    fleet-readiness-report.timer
 )
 if [ -f /opt/shift-agent/proposal_sweep.py ]; then
     smoke_enabled_units+=( shift-agent-proposal-sweep.timer )
@@ -927,6 +928,9 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary.service
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
+    /etc/systemd/system/fleet-readiness-report.service
+    /etc/systemd/system/fleet-readiness-report.timer
+    /etc/systemd/system/fleet-readiness-report-failure.service
     /etc/systemd/system/flyer-recovery-watchdog.service
     /etc/systemd/system/flyer-recovery-watchdog.timer
     /etc/systemd/system/flyer-recovery-watchdog-failure.service
