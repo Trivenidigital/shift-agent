@@ -1,5 +1,6 @@
 [Unit]
 Description=Corrupt-state quarantine watchdog — alert on safe_io *.corrupt-* artifacts (audit S2-8)
+OnFailure=check-corrupt-state-failure.service
 
 [Service]
 Type=oneshot

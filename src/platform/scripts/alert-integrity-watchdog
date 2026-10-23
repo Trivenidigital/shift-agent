@@ -9,14 +9,19 @@ no Markdown parse mode anywhere per CLAUDE.md §12b):
      /opt/shift-agent/logs/decisions.log has never had a freshness watchdog.
      Alert if its mtime is older than the threshold (default 120 min,
      env-tunable) OR it is missing — a stalled audit/pipeline writer is exactly
-     the silent-failure surface §12a exists to catch.
+     the silent-failure surface §12a exists to catch. The STALE page body is
+     stable (the age lives only in the structured event) and a persisting STALE
+     re-pages at most every 360 min (state key last_stale_page_at, cleared once
+     the log is fresh again).
 
   2. notify-failed.log growth (§12b dead-letter). notify_owner_with_fallback
-     appends a line to notify-failed.log whenever an owner alert could not be
-     delivered (Pushover AND WhatsApp both down). Until now nothing read that
-     file, so any future owner-alert outage silently lost every alert. Track a
-     byte-offset in a small state JSON; when new dropped-alert lines appear since
-     the last run, page the owner with the count + first new line.
+     appends a line to logs/notify-failed.log, and shift-agent-notify-owner /
+     send-coverage-message append to state/notify-failed.log, whenever an owner
+     alert could not be delivered (Pushover AND WhatsApp both down). Until now
+     nothing read those files, so any owner-alert outage silently lost every
+     alert. Track a byte-offset per file in a small state JSON; when new
+     dropped-alert lines appear since the last run, page the owner with the
+     count + first new line.
 
 §12b observability: prints structured one-line JSON events so journalctl can
 always distinguish healthy / stale / dead-letter-growth / delivery-failed:
@@ -65,8 +70,14 @@ except Exception:  # pragma: no cover - Windows/fcntl-less test host fallback
 
 DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 NOTIFY_FAILED_LOG_PATH = Path("/opt/shift-agent/logs/notify-failed.log")
+# Second dead-letter file: shift-agent-notify-owner (and send-coverage-message)
+# append here when every channel fails. Distinct from the safe_io fallback log
+# above; each file keeps its own byte offset in the state JSON.
+STATE_NOTIFY_FAILED_LOG_PATH = Path("/opt/shift-agent/state/notify-failed.log")
 STATE_PATH = Path("/opt/shift-agent/state/alert-integrity-watchdog.json")
 DEFAULT_FRESHNESS_THRESHOLD_MIN = 120
+# A persisting STALE re-pages at most this often (state key last_stale_page_at).
+DEFAULT_STALE_REPAGE_MIN = 360
 DEFAULT_PRIORITY = 1
 SOURCE = "alert-integrity-watchdog"
 
@@ -97,7 +108,9 @@ def run_watchdog(
     notify_failed_log_path: Path,
     state_path: Path,
     now: datetime,
+    state_notify_failed_log_path: Optional[Path] = None,
     freshness_threshold_minutes: int = DEFAULT_FRESHNESS_THRESHOLD_MIN,
+    stale_repage_minutes: int = DEFAULT_STALE_REPAGE_MIN,
     priority: int = DEFAULT_PRIORITY,
     notify_func: Optional[NotifyFunc] = None,
 ) -> dict[str, Any]:
@@ -113,7 +126,7 @@ def run_watchdog(
         events.append(rec)
         print(json.dumps(rec))
 
-    def _page(kind: str, title: str, message: str) -> None:
+    def _page(kind: str, title: str, message: str) -> bool:
         nonlocal delivery_failed
         _emit(f"alert_integrity_{kind}_alert_dispatched")
         try:
@@ -122,12 +135,25 @@ def run_watchdog(
             _emit(f"alert_integrity_{kind}_alert_delivery_failed",
                   error=f"{type(exc).__name__}: {exc}"[:300])
             delivery_failed = True
-            return
+            return False
         if ok:
             _emit(f"alert_integrity_{kind}_alert_delivered")
         else:
             _emit(f"alert_integrity_{kind}_alert_delivery_failed")
             delivery_failed = True
+        return ok
+
+    # Load state and capture every dead-letter size BEFORE dispatching any alert,
+    # so a delivery failure written to a notify-failed.log DURING this run is
+    # counted next run, not this one.
+    state = _load_state(state_path)
+    new_state = dict(state)
+    dead_letters = [("notify_failed_offset", notify_failed_log_path)]
+    if state_notify_failed_log_path is not None:
+        dead_letters.append(("state_notify_failed_offset", state_notify_failed_log_path))
+    sizes = {
+        key: (path.stat().st_size if path.exists() else 0) for key, path in dead_letters
+    }
 
     # ── Check 1: decisions.log freshness (§12a) ───────────────────────────────
     decisions_status = "fresh"
@@ -144,63 +170,96 @@ def run_watchdog(
         age_minutes = max((now.timestamp() - decisions_log_path.stat().st_mtime) / 60.0, 0.0)
         if age_minutes > freshness_threshold_minutes:
             decisions_status = "stale"
-            _page(
-                "decisions_log_stale",
-                "Audit log STALE",
-                f"decisions.log has not been written in {int(age_minutes)} min "
-                f"(threshold {freshness_threshold_minutes} min). The audit/pipeline "
-                f"writer may be stalled — check hermes-gateway + the agent timers.",
-            )
+            # The age lives only in the structured event: the page body must be
+            # STABLE so every repeat shares one notify dedupe key.
+            _emit("alert_integrity_decisions_log_stale",
+                  decisions_log_age_minutes=round(age_minutes, 1),
+                  freshness_threshold_minutes=freshness_threshold_minutes)
+            last_page_raw = state.get("last_stale_page_at")
+            due = True
+            if isinstance(last_page_raw, str) and last_page_raw:
+                try:
+                    since = (now - parse_utc(last_page_raw)).total_seconds() / 60.0
+                    due = since >= stale_repage_minutes
+                except ValueError:
+                    due = True
+            if due:
+                delivered = _page(
+                    "decisions_log_stale",
+                    "Audit log STALE",
+                    f"decisions.log has not been written for more than "
+                    f"{freshness_threshold_minutes} min. The audit/pipeline writer may "
+                    f"be stalled — check hermes-gateway + the agent timers.",
+                )
+                if delivered:
+                    new_state["last_stale_page_at"] = now.isoformat()
+            else:
+                _emit("alert_integrity_decisions_log_stale_repage_suppressed",
+                      last_stale_page_at=last_page_raw,
+                      stale_repage_minutes=stale_repage_minutes)
+        else:
+            new_state.pop("last_stale_page_at", None)
 
     # ── Check 2: notify-failed.log growth (§12b dead-letter) ──────────────────
-    # Capture the size BEFORE dispatching any alert so a delivery failure written
-    # to notify-failed.log DURING this run is counted next run, not this one.
-    state = _load_state(state_path)
-    last_offset = state.get("notify_failed_offset")
-    last_offset = int(last_offset) if isinstance(last_offset, (int, float)) else 0
-    size_now = notify_failed_log_path.stat().st_size if notify_failed_log_path.exists() else 0
-    # A shrink means the file was rotated/truncated — re-scan from the start.
-    start = 0 if size_now < last_offset else last_offset
-    new_lines: list[str] = []
-    if size_now > start and notify_failed_log_path.exists():
-        try:
-            with notify_failed_log_path.open("rb") as fh:
-                fh.seek(start)
-                chunk = fh.read(size_now - start)
-            new_lines = [ln for ln in chunk.decode("utf-8", "replace").splitlines() if ln.strip()]
-        except OSError:
-            new_lines = []
+    # Counted per file (the safe_io helper and the notify-owner binary can BOTH
+    # append for one failed alert, so a sum would double-count); one page per
+    # run regardless of how many files grew.
+    new_counts: dict[str, int] = {}
+    first_new: dict[str, str] = {}
+    for key, path in dead_letters:
+        last_offset = state.get(key)
+        last_offset = int(last_offset) if isinstance(last_offset, (int, float)) else 0
+        size_now = sizes[key]
+        # A shrink means the file was rotated/truncated — re-scan from the start.
+        start = 0 if size_now < last_offset else last_offset
+        new_lines: list[str] = []
+        if size_now > start and path.exists():
+            try:
+                with path.open("rb") as fh:
+                    fh.seek(start)
+                    chunk = fh.read(size_now - start)
+                new_lines = [ln for ln in chunk.decode("utf-8", "replace").splitlines() if ln.strip()]
+            except OSError:
+                new_lines = []
+        new_counts[key] = len(new_lines)
+        new_state[key] = size_now
+        if new_lines:
+            first_new[key] = new_lines[0][:200]
 
-    notify_failed_status = "ok"
-    if new_lines:
-        notify_failed_status = "growth"
-        first = new_lines[0][:200]
+    paths_by_key = dict(dead_letters)
+    notify_failed_status = "growth" if first_new else "ok"
+    if first_new:
+        per_file = {str(paths_by_key[k]): n for k, n in new_counts.items()}
+        _emit("alert_integrity_notify_failed_growth", new_lines_per_file=per_file)
+        grown = "; ".join(f"{n} owner alert(s) in {p}" for p, n in per_file.items() if n)
+        first_key = next(iter(first_new))
         _page(
             "notify_failed_growth",
             "Owner alerts DROPPED",
-            f"{len(new_lines)} owner alert(s) were dropped (Pushover + WhatsApp both "
-            f"failed) and logged to notify-failed.log with nothing reading them. "
-            f"First: {first}. Investigate delivery and drain the backlog.",
+            f"Owner alerts were dropped (Pushover + WhatsApp both failed) and logged "
+            f"to a dead-letter file with nothing reading them: {grown}. "
+            f"First: {first_new[first_key]}. Investigate delivery and drain the backlog.",
         )
 
-    if size_now != last_offset:
-        atomic_write_json(state_path, {
-            "notify_failed_offset": size_now,
-            "updated_at": now.isoformat(),
-        })
+    if new_state != state:
+        new_state["updated_at"] = now.isoformat()
+        atomic_write_json(state_path, new_state)
 
     if decisions_status == "fresh" and notify_failed_status == "ok":
         _emit("alert_integrity_ok",
               decisions_log_age_minutes=(round(age_minutes, 1) if age_minutes is not None else None),
-              notify_failed_offset=size_now)
+              notify_failed_offset=sizes["notify_failed_offset"],
+              state_notify_failed_offset=sizes.get("state_notify_failed_offset"))
 
     return {
         "exit_code": EXIT_DEPENDENCY_DOWN if delivery_failed else EXIT_OK,
         "decisions_log_status": decisions_status,
         "decisions_log_age_minutes": age_minutes,
         "notify_failed_status": notify_failed_status,
-        "notify_failed_new_count": len(new_lines),
-        "notify_failed_offset": size_now,
+        "notify_failed_new_count": new_counts["notify_failed_offset"],
+        "notify_failed_offset": sizes["notify_failed_offset"],
+        "state_notify_failed_new_count": new_counts.get("state_notify_failed_offset", 0),
+        "state_notify_failed_offset": sizes.get("state_notify_failed_offset"),
         "delivery_failed": delivery_failed,
         "events": events,
     }
@@ -210,8 +269,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Watchdog for audit-log freshness + dropped-owner-alert growth.")
     ap.add_argument("--decisions-log", default=str(DECISIONS_LOG_PATH))
     ap.add_argument("--notify-failed-log", default=str(NOTIFY_FAILED_LOG_PATH))
+    ap.add_argument("--state-notify-failed-log", default=str(STATE_NOTIFY_FAILED_LOG_PATH))
     ap.add_argument("--state", default=str(STATE_PATH))
     ap.add_argument("--freshness-threshold-minutes", type=int, default=DEFAULT_FRESHNESS_THRESHOLD_MIN)
+    ap.add_argument("--stale-repage-minutes", type=int, default=DEFAULT_STALE_REPAGE_MIN)
     ap.add_argument("--priority", type=int, choices=[-2, -1, 0, 1, 2], default=DEFAULT_PRIORITY)
     ap.add_argument("--now", default="")
     args = ap.parse_args(argv)
@@ -220,9 +281,11 @@ def main(argv: list[str] | None = None) -> int:
     result = run_watchdog(
         decisions_log_path=Path(args.decisions_log),
         notify_failed_log_path=Path(args.notify_failed_log),
+        state_notify_failed_log_path=Path(args.state_notify_failed_log),
         state_path=Path(args.state),
         now=now,
         freshness_threshold_minutes=args.freshness_threshold_minutes,
+        stale_repage_minutes=args.stale_repage_minutes,
         priority=args.priority,
     )
     return int(result.get("exit_code", 0))

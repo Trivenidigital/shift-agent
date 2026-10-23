@@ -219,3 +219,173 @@ def test_deploy_installs_platform_timers_and_enables_watchdog():
     assert "install -m 644 src/platform/systemd/*.timer" in deploy
     assert "systemctl enable --now alert-integrity-watchdog.timer" in deploy
     assert "alert-integrity-watchdog.timer" in smoke
+
+
+# ── PR3 alert hygiene: stable STALE body + 6h re-page + second dead-letter ────
+
+def _stale_kw(module, tmp_path, now_iso):
+    d = tmp_path / "decisions.log"
+    if not d.exists():
+        d.write_text("{}\n", encoding="utf-8")
+        t = module.parse_utc(NOW).timestamp() - 200 * 60  # stale at NOW
+        os.utime(d, (t, t))
+    return dict(
+        decisions_log_path=d,
+        notify_failed_log_path=tmp_path / "notify-failed.log",
+        state_notify_failed_log_path=tmp_path / "state-notify-failed.log",
+        state_path=tmp_path / "state.json",
+        now=module.parse_utc(now_iso),
+        freshness_threshold_minutes=120,
+    )
+
+
+def _stale_pages(calls):
+    return [c for c in calls if c["title"] == "Audit log STALE"]
+
+
+def test_stale_pages_once_then_not_within_6h(tmp_path):
+    module = load_module()
+    n1, c1 = _recording_notify()
+    r1 = module.run_watchdog(notify_func=n1, **_stale_kw(module, tmp_path, NOW))
+    assert len(_stale_pages(c1)) == 1
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["last_stale_page_at"].startswith("2026-06-05T12:00:00")
+    # 15 min and 5h59m later: still stale, no re-page, suppression is traceable.
+    for later in ("2026-06-05T12:15:00Z", "2026-06-05T17:59:00Z"):
+        n, c = _recording_notify()
+        r = module.run_watchdog(notify_func=n, **_stale_kw(module, tmp_path, later))
+        assert r["decisions_log_status"] == "stale"
+        assert _stale_pages(c) == []
+        evs = [e["event"] for e in r["events"]]
+        assert "alert_integrity_decisions_log_stale_repage_suppressed" in evs
+        assert "alert_integrity_decisions_log_stale" in evs
+    assert r1["exit_code"] == 0
+
+
+def test_stale_repages_after_6h(tmp_path):
+    module = load_module()
+    n1, _ = _recording_notify()
+    module.run_watchdog(notify_func=n1, **_stale_kw(module, tmp_path, NOW))
+    n2, c2 = _recording_notify()
+    module.run_watchdog(notify_func=n2, **_stale_kw(module, tmp_path, "2026-06-05T18:00:00Z"))
+    assert len(_stale_pages(c2)) == 1
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["last_stale_page_at"].startswith("2026-06-05T18:00:00")
+
+
+def test_stale_page_body_is_stable_and_has_no_minutes_count(tmp_path):
+    module = load_module()
+    n1, c1 = _recording_notify()
+    module.run_watchdog(notify_func=n1, **_stale_kw(module, tmp_path, NOW))
+    n2, c2 = _recording_notify()
+    module.run_watchdog(notify_func=n2, **_stale_kw(module, tmp_path, "2026-06-06T02:00:00Z"))
+    body1, body2 = _stale_pages(c1)[0]["message"], _stale_pages(c2)[0]["message"]
+    assert body1 == body2  # one dedupe key across repeats
+    assert "200" not in body1 and "1040" not in body2  # the age never reaches the body
+    # ...but the age IS in the structured event.
+    r = module.run_watchdog(notify_func=_recording_notify()[0],
+                            **_stale_kw(module, tmp_path, "2026-06-06T02:05:00Z"))
+    ev = [e for e in r["events"] if e["event"] == "alert_integrity_decisions_log_stale"][0]
+    assert ev["decisions_log_age_minutes"] == 1045.0
+
+
+def test_failed_stale_page_does_not_arm_repage_window(tmp_path):
+    module = load_module()
+    nf, _ = _failing_notify()
+    r = module.run_watchdog(notify_func=nf, **_stale_kw(module, tmp_path, NOW))
+    assert r["exit_code"] == 6
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert "last_stale_page_at" not in saved
+    n2, c2 = _recording_notify()
+    module.run_watchdog(notify_func=n2, **_stale_kw(module, tmp_path, "2026-06-05T12:15:00Z"))
+    assert len(_stale_pages(c2)) == 1
+
+
+def test_fresh_log_clears_last_stale_page_at(tmp_path):
+    module = load_module()
+    n1, _ = _recording_notify()
+    module.run_watchdog(notify_func=n1, **_stale_kw(module, tmp_path, NOW))
+    d = tmp_path / "decisions.log"
+    t = module.parse_utc("2026-06-05T12:30:00Z").timestamp()
+    os.utime(d, (t, t))  # writer recovered
+    n2, c2 = _recording_notify()
+    r2 = module.run_watchdog(notify_func=n2, **_stale_kw(module, tmp_path, "2026-06-05T12:35:00Z"))
+    assert r2["decisions_log_status"] == "fresh" and c2 == []
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert "last_stale_page_at" not in saved
+    # Stale again 1h later -> pages immediately (window was cleared).
+    t_old = module.parse_utc("2026-06-05T12:30:00Z").timestamp()
+    os.utime(d, (t_old, t_old))
+    n3, c3 = _recording_notify()
+    module.run_watchdog(notify_func=n3, **_stale_kw(module, tmp_path, "2026-06-05T14:45:00Z"))
+    assert len(_stale_pages(c3)) == 1
+
+
+def test_state_dead_letter_growth_pages_with_own_offset(tmp_path):
+    module = load_module()
+    d = _fresh_decisions(module, tmp_path)
+    logs_nf = tmp_path / "notify-failed.log"
+    state_nf = tmp_path / "state-notify-failed.log"
+    state_nf.write_text(
+        json.dumps({"ts": "t1", "message": "NOTIFY-OWNER-DROP", "results": []}) + "\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "state.json"
+    kw = dict(decisions_log_path=d, notify_failed_log_path=logs_nf,
+              state_notify_failed_log_path=state_nf, state_path=state,
+              now=module.parse_utc(NOW), freshness_threshold_minutes=120)
+    n1, c1 = _recording_notify()
+    r1 = module.run_watchdog(notify_func=n1, **kw)
+    assert r1["notify_failed_status"] == "growth"
+    assert r1["state_notify_failed_new_count"] == 1
+    assert r1["notify_failed_new_count"] == 0
+    drops = [c for c in c1 if c["title"] == "Owner alerts DROPPED"]
+    assert len(drops) == 1
+    assert "NOTIFY-OWNER-DROP" in drops[0]["message"]
+    assert f"1 owner alert(s) in {state_nf}" in drops[0]["message"]
+    ev = [e for e in r1["events"] if e["event"] == "alert_integrity_notify_failed_growth"][0]
+    assert ev["new_lines_per_file"] == {str(logs_nf): 0, str(state_nf): 1}
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["state_notify_failed_offset"] == state_nf.stat().st_size
+    assert saved["notify_failed_offset"] == 0
+    # No growth -> silent.
+    n2, c2 = _recording_notify()
+    assert module.run_watchdog(notify_func=n2, **kw)["notify_failed_status"] == "ok"
+    assert c2 == []
+
+
+def test_both_dead_letters_growing_is_one_page_with_per_file_counts(tmp_path):
+    """One failed alert can land in BOTH files (safe_io helper + notify-owner
+    binary): counts are reported per file, never summed, and the run pages once."""
+    module = load_module()
+    d = _fresh_decisions(module, tmp_path)
+    logs_nf = tmp_path / "notify-failed.log"
+    state_nf = tmp_path / "state-notify-failed.log"
+    logs_nf.write_text(
+        json.dumps({"ts": "t1", "source": "a", "title": "LOGS-DROP"}) + "\n"
+        + json.dumps({"ts": "t2", "source": "b", "title": "LOGS-DROP-2"}) + "\n",
+        encoding="utf-8",
+    )
+    state_nf.write_text(json.dumps({"ts": "t1", "message": "BIN-DROP", "results": []}) + "\n",
+                        encoding="utf-8")
+    notify, calls = _recording_notify()
+    r = module.run_watchdog(
+        decisions_log_path=d, notify_failed_log_path=logs_nf,
+        state_notify_failed_log_path=state_nf, state_path=tmp_path / "state.json",
+        now=module.parse_utc(NOW), freshness_threshold_minutes=120, notify_func=notify,
+    )
+    assert len(calls) == 1
+    assert r["notify_failed_new_count"] == 2
+    assert r["state_notify_failed_new_count"] == 1
+    ev = [e for e in r["events"] if e["event"] == "alert_integrity_notify_failed_growth"][0]
+    assert ev["new_lines_per_file"] == {str(logs_nf): 2, str(state_nf): 1}
+    msg = calls[0]["message"]
+    assert f"2 owner alert(s) in {logs_nf}" in msg
+    assert f"1 owner alert(s) in {state_nf}" in msg
+    assert "3 owner alert" not in msg
+
+
+def test_cli_default_watches_state_dead_letter():
+    module = load_module()
+    assert str(module.STATE_NOTIFY_FAILED_LOG_PATH) == "/opt/shift-agent/state/notify-failed.log"
+    assert module.DEFAULT_STALE_REPAGE_MIN == 360

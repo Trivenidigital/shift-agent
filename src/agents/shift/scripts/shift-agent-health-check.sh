@@ -7,7 +7,8 @@
 #   - OpenRouter check: check HTTP 200 explicitly, not substring "data"
 #   - healthchecks.io URL extraction via Python (not fragile grep|sed)
 #
-# Touches state/last-health-check-ts on success (watchdog reads).
+# Touches state/last-health-check-ts on every completed run (watchdog reads;
+# a mid-run crash leaves it stale).
 
 set -euo pipefail
 
@@ -120,9 +121,14 @@ fi
 
 # ── Report ──
 now_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Run-completed heartbeat — written on EVERY completed run, green or failing.
+# It means "the health-check is running", not "all green": the watchdog's
+# "Health check itself has stopped" page must fire only when the check stopped
+# (or crashed mid-run under set -e), never merely because a check failed —
+# failures already page "Agent health issues" below.
+date -u +%s > "$LAST_TS_FILE"
 if [ ${#failures[@]} -eq 0 ]; then
     echo "$now_ts OK" >> "$HEALTH_LOG"
-    date -u +%s > "$LAST_TS_FILE"
     # Ping healthchecks.io if configured (via Python, not grep|sed)
     hc_url=$(python3 -c "
 import yaml
