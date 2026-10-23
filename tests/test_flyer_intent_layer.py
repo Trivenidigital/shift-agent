@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 import time
 import json
@@ -290,18 +289,16 @@ def test_classifier_shadow_success_validates_decision():
 
 
 def test_cf_router_flyer_reason_literals_match_schema():
+    # Generalized 2026-10-23 into fleet_harness.intercepted_reason_literals (all
+    # prefixes, hooks.py + actions.py, AST incl. ternaries and variable-routed
+    # reasons); tests/test_fleet_conformance.py guards the non-flyer literals.
+    from fleet_harness import intercepted_reason_literals
+
     source = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
-    reasons = {
-        match.group(1)
-        for pattern in (
-            r'reason\s*=\s*"((?:flyer_)[^"]+)"',
-            r'reason\s*=\s*\(\s*"((?:flyer_)[^"]+)"',
-            # ternary `reason=("X" if c else "Y")` — the else-branch literal would
-            # otherwise be missed (2026-06-06: flyer_bare_brief_generation_failed).
-            r'\belse\s+"((?:flyer_)[^"]+)"',
-        )
-        for match in re.finditer(pattern, source)
-    }
+    reasons = {lit for _, lit in intercepted_reason_literals(source) if lit.startswith("flyer_")}
+    # Witnesses: the ternary else-branch (2026-06-06) and a variable-routed pair.
+    assert {"flyer_bare_brief_generation_failed", "flyer_starter_preference_off",
+            "flyer_starter_already_sent"} <= reasons
     allowed = set(get_args(CfRouterIntercepted.model_fields["reason"].annotation))
     missing = sorted(reasons - allowed)
     assert missing == []

@@ -18,6 +18,7 @@ shares the module since it's audit-log-tail-scanning logic.
 from __future__ import annotations
 import json as _json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -25,8 +26,13 @@ from typing import Any, Callable, Iterable, Optional
 
 from pydantic import TypeAdapter
 
-from safe_io import ndjson_append, FileLock
-from schemas import ConfigLoadFailed, CateringQuoteSentLeadMissing
+from safe_io import (
+    FileLock,
+    LockUnavailable,
+    ndjson_append,
+    try_acquire_filelock_with_retry,
+)
+from schemas import AuditEmitFailed, ConfigLoadFailed, CateringQuoteSentLeadMissing
 
 
 _LOG_PATH_DEFAULT = Path("/opt/shift-agent/logs/decisions.log")
@@ -127,6 +133,85 @@ def log_quote_sent_lead_missing_best_effort(
         _append_best_effort(line, log_path or _default_log_path())
     except Exception:
         pass
+
+
+_PHONE_LIKE = re.compile(r"\+?\d{7,}")
+
+
+def _scrub(value: str, limit: int) -> str:
+    """Replace phone-like digit runs with `<num>` and truncate to `limit`."""
+    return _PHONE_LIKE.sub("<num>", value or "")[:limit]
+
+
+def _error_locations(error: BaseException) -> str:
+    """Metadata-only summary of a pydantic ValidationError: `loc:type` pairs.
+
+    Deliberately NOT str(error): pydantic echoes `input_value=...`, which for an
+    inbound audit row can be message text or a phone number."""
+    errors = getattr(error, "errors", None)
+    if not callable(errors):
+        return ""
+    try:
+        parts = [
+            f"{'.'.join(str(x) for x in e.get('loc', ()))}:{e.get('type', '')}"
+            for e in errors()
+        ]
+    except Exception:
+        return ""
+    return "; ".join(parts)
+
+
+def record_audit_emit_failure(
+    *,
+    source: str,
+    intended_type: str,
+    error: BaseException,
+    intended_reason: Optional[str] = None,
+    detail: str = "",
+    log_path: Optional[Path] = None,
+) -> bool:
+    """§12a: leave a durable `audit_emit_failed` row where a best-effort audit
+    write was swallowed. NEVER raises and NEVER blocks — callers sit on an
+    inbound gateway turn. Returns True iff the row was appended.
+
+    Lock: ONE non-blocking attempt on `<log>.lock`; when contended the trace is
+    reported to stderr instead of stalling the turn. Scope: it writes to the
+    same sink the failed emitter used, so it surfaces ValidationError-class
+    drops (the proven class), not disk/permission failures of that sink.
+
+    `detail` is METADATA ONLY (callers must never pass message text or phones);
+    when empty it defaults to the ValidationError's `loc:type` pairs. Phone-like
+    digit runs are scrubbed to `<num>` defensively and every field is clamped to
+    its schema bound so the trace row itself cannot fail validation.
+
+    Test override: pass log_path=tmp_path / "decisions.log".
+    """
+    try:
+        entry = AuditEmitFailed(
+            type="audit_emit_failed",
+            ts=datetime.now(timezone.utc),
+            source=_scrub(source, 64) or "<unknown>",
+            intended_type=_scrub(intended_type, 64) or "<unknown>",
+            intended_reason=(_scrub(intended_reason, 64)
+                             if intended_reason is not None else None),
+            error_class=type(error).__name__[:64] or "<unknown>",
+            detail=_scrub(detail or _error_locations(error), 500),
+        )
+        line = TypeAdapter(AuditEmitFailed).dump_json(entry).decode("utf-8")
+        path = log_path or _default_log_path()
+        try:
+            with try_acquire_filelock_with_retry(Path(str(path) + ".lock"),
+                                                 attempts=1, sleep_sec=0):
+                ndjson_append(path, line)
+        except LockUnavailable:
+            sys.stderr.write(
+                f"audit_emit_failed not written (decisions.log lock busy): "
+                f"{entry.source} {entry.intended_type} {entry.error_class}\n"
+            )
+            return False
+        return True
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────

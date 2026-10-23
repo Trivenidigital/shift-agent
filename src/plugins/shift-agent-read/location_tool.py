@@ -164,8 +164,17 @@ def _audit(source: str, results: list, detail: str = "") -> None:
         _append_best_effort(entry.model_dump_json(),
                             Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
                                                 "/opt/shift-agent/logs/decisions.log")))
-    except Exception:
-        pass  # audit is best-effort; it must never break a customer answer
+    except Exception as e:  # audit is best-effort; it must never break a customer answer
+        try:  # §12a: leave a durable trace of the swallowed write
+            from audit_helpers import record_audit_emit_failure
+            record_audit_emit_failure(
+                source="shift-agent-read.location_tool",
+                intended_type="multi_location_closest_lookup",
+                error=e,
+                intended_reason=source,
+            )
+        except Exception:
+            pass
 
 
 def _answer(text: str, audit_source: str = "", audit_results=(),

@@ -1,6 +1,6 @@
 ---
 name: employee_docs_dispatcher
-description: Use for tracking expiring employee documents — H-1B work auth, I-9 re-verification, food handler certs, driver's licenses for delivery staff. Liability-adjacent: agent surfaces dates, never advises on legal status. v0.1 stub.
+description: "Use for tracking expiring employee documents — H-1B work auth, I-9 re-verification, food handler certs, driver's licenses for delivery staff. Liability-adjacent: agent surfaces dates, never advises on legal status. v0.1 stub."
 ---
 
 # Employee Document Tracker (Agent #14) — v0.1 stub
