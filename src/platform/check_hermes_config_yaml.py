@@ -46,6 +46,27 @@ KNOWN_MODEL_SUBKEYS = ("default", "provider", "base_url", "context_length", "max
 KNOWN_AUXILIARY_SUBKEYS = ("vision",)
 KNOWN_VISION_SUBKEYS = ("provider", "model")
 
+# Loadout conformance (the shift-agent execution model). These are the Hermes
+# config entries the repo's plugins/read tools depend on; a missing entry does
+# not error anywhere in Hermes - the plugin's hooks/tools simply never load.
+# Source of truth: docs/runbooks/gateway-toolset-scoping.md (keep in sync).
+# Superset semantics: extra plugins / toolsets / disables always pass; only a
+# MISSING required entry is reported.
+# Live read-back 2026-10-23 on box a680d32f: plugins 3/3, whatsapp toolset
+# contains shift_agent_read, 7 disabled toolsets incl. file - all FAIL checks pass.
+# A FAIL blocks the deploy pre-install gate (shift-agent-deploy.sh, the
+# "Hermes config.yaml shape gate" block) and fails the smoke test (smoke-side
+# shape gate -> auto-rollback). Per-field override: tools/check-hermes-config-yaml.sh.
+REQUIRED_PLUGINS = ("cf-router", "shift-agent-policy", "shift-agent-read")
+# Toolset that exposes the 5 shift_agent_read tools on the WhatsApp gateway.
+REQUIRED_WHATSAPP_TOOLSETS = ("shift_agent_read",)
+# Toolsets that MUST stay disabled (FAIL when missing): their absence makes
+# SKILL.md loading and shell/code execution reachable again.
+REQUIRED_DISABLED_TOOLSETS = ("terminal", "skills", "code_execution")
+# Toolsets the runbook recommends disabling (WARN-not-FAIL when missing).
+RECOMMENDED_DISABLED_TOOLSETS = ("delegation", "browser", "clarify", "file")
+TOOLSET_RUNBOOK = "docs/runbooks/gateway-toolset-scoping.md"
+
 # Sanity cap on YAML file size. Live main-vps config is ~2 KB; 1 MiB is 500×
 # headroom and bounds memory exhaustion if an operator accidentally redirects
 # a large file into the config path.
@@ -68,6 +89,9 @@ class GateResult:
     unknown_top_level: list[str] = field(default_factory=list)
     unknown_subkeys: list[dict[str, str]] = field(default_factory=list)
     advisory_warnings: list[str] = field(default_factory=list)
+    # Human explanation per missing_required entry (loadout-conformance checks);
+    # keys are the exact missing_required field names used for override attestation.
+    missing_reasons: dict[str, str] = field(default_factory=dict)
     config_path: str = ""
 
 
@@ -241,6 +265,11 @@ def check_config(config_path: Path, baseline_path: Path, *, baseline_required: b
                     f"(value redacted); expected one of {ALLOWED_PROVIDER_ROUTING_SORT} (advisory only)"
                 )
 
+    # 4c'. Loadout conformance (plugins / gateway toolsets). Field names are
+    # `<yaml.path>:<entry>` so the bash wrapper's override attestation can name
+    # one exact missing entry.
+    _check_loadout_conformance(doc, result)
+
     # 4d. Unknown top-level keys
     known_top = load_baseline(baseline_path)
     if known_top:  # if no baseline, skip WARN (fresh-checkout / test case)
@@ -259,6 +288,63 @@ def check_config(config_path: Path, baseline_path: Path, *, baseline_required: b
     return result
 
 
+def _string_list(doc: dict, parent: str, key: str) -> list[str]:
+    """Return doc[parent][key] as a list of strings; [] when absent or non-list."""
+    block = doc.get(parent)
+    if not isinstance(block, dict):
+        return []
+    value = block.get(key)
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)]
+
+
+def _check_loadout_conformance(doc: dict, result: GateResult) -> None:
+    """FAIL/WARN on missing plugins and gateway toolset scoping.
+
+    See docs/runbooks/gateway-toolset-scoping.md. Absent or non-list blocks are
+    treated as empty (every required entry is reported missing): Hermes applies
+    its defaults in that case, which is exactly the silent drift this gate
+    exists to surface.
+    """
+    def _missing(field_name: str, reason: str) -> None:
+        result.missing_required.append(field_name)
+        result.missing_reasons[field_name] = reason
+
+    enabled = _string_list(doc, "plugins", "enabled")
+    for plugin in REQUIRED_PLUGINS:
+        if plugin not in enabled:
+            _missing(
+                f"plugins.enabled:{plugin}",
+                f"plugin '{plugin}' is not in plugins.enabled - every hook/tool it "
+                f"registers will silently vanish from the gateway",
+            )
+
+    whatsapp = _string_list(doc, "platform_toolsets", "whatsapp")
+    for toolset in REQUIRED_WHATSAPP_TOOLSETS:
+        if toolset not in whatsapp:
+            _missing(
+                f"platform_toolsets.whatsapp:{toolset}",
+                f"toolset '{toolset}' is not in platform_toolsets.whatsapp - all 5 "
+                f"shift_agent_read tools disappear from WhatsApp turns",
+            )
+
+    disabled = _string_list(doc, "agent", "disabled_toolsets")
+    for toolset in REQUIRED_DISABLED_TOOLSETS:
+        if toolset not in disabled:
+            _missing(
+                f"agent.disabled_toolsets:{toolset}",
+                f"toolset '{toolset}' is not in agent.disabled_toolsets - the gateway "
+                f"model regains it (see {TOOLSET_RUNBOOK})",
+            )
+    for toolset in RECOMMENDED_DISABLED_TOOLSETS:
+        if toolset not in disabled:
+            result.advisory_warnings.append(
+                f"agent.disabled_toolsets does not contain '{toolset}' "
+                f"(recommended by {TOOLSET_RUNBOOK}; advisory only)"
+            )
+
+
 def emit_text(result: GateResult, stream) -> None:
     """Pretty-print human-readable summary to stream (stderr in production)."""
     if result.exit_code == 2:
@@ -275,7 +361,9 @@ def emit_text(result: GateResult, stream) -> None:
     if result.exit_code == 1:
         stream.write(f"FAIL: {result.config_path} shape gate detected issues:\n")
         for f in result.missing_required:
-            stream.write(f"  - MISSING REQUIRED: {f}\n")
+            reason = result.missing_reasons.get(f)
+            suffix = f" ({reason})" if reason else ""
+            stream.write(f"  - MISSING REQUIRED: {f}{suffix}\n")
         for w in result.wrong_shape:
             stream.write(f"  - WRONG SHAPE: {w['field']} (got {w['got']}; want {w['want']})\n")
     else:
