@@ -93,7 +93,11 @@ def test_deploy_installs_module_and_enables_timer_beside_routing_summary():
 
 def test_smoke_asserts_units_exactly_where_routing_summary_is_asserted():
     smoke = SMOKE.read_text(encoding="utf-8")
-    assert "    send-routing-accuracy-summary.timer \\\n    fleet-readiness-report.timer; do" in smoke
+    # The enabled-units list is the smoke_enabled_units array (mirrors deploy's
+    # unconditional enables); the new timer must be one of its entries.
+    start = smoke.index("smoke_enabled_units=(")
+    end = smoke.index(")", start)
+    assert "    fleet-readiness-report.timer\n" in smoke[start:end]
     for unit in ("fleet-readiness-report.service", "fleet-readiness-report.timer",
                  "fleet-readiness-report-failure.service"):
         assert f"/etc/systemd/system/{unit}" in smoke
