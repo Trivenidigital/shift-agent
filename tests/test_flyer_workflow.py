@@ -323,6 +323,10 @@ def test_extract_revision_field_updates_handles_date_and_time_change():
         venue_or_location="Triveni Pineville",
         contact_info="+1 904 555 0123",
     ))
+    # The day-only roll-forward rule uses project.created_at as its "not before"
+    # anchor. _project() stamps the wall clock, so from 2026-10-19 on this test
+    # resolved "18" to 2026-11-18 and failed. Pin the anchor before the 18th.
+    project = project.model_copy(update={"created_at": datetime(2026, 10, 1, tzinfo=timezone.utc)})
     updates = extract_revision_field_updates(
         project,
         "I'd like you to change the date from October 15 to 18. Time from 6 PM to 4 PM.",

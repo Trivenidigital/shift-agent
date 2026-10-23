@@ -30,9 +30,12 @@ if [ $((now_s - last_alert_s)) -lt $ALERT_THROTTLE_SEC ]; then
     exit 0
 fi
 
-/usr/local/bin/shift-agent-notify-owner \
+# Arm the throttle only after a DELIVERED page (exit 0): a failed send must
+# retry next tick instead of silencing the alert for an hour.
+if /usr/local/bin/shift-agent-notify-owner \
     --title "Health check itself has stopped" \
     --priority 2 \
-    "Watchdog: the Shift Agent health-check hasn't run in ${age}s (threshold ${STALE_THRESHOLD_SEC}s). The agent may be in a degraded state without alerting. SSH to the VPS and run 'systemctl status shift-agent-health.timer'." \
-|| true
-echo "$now_s" > "$WATCHDOG_ALERT_FILE"
+    "Watchdog: the Shift Agent health-check hasn't run in ${age}s (threshold ${STALE_THRESHOLD_SEC}s). The agent may be in a degraded state without alerting. SSH to the VPS and run 'systemctl status shift-agent-health.timer'."
+then
+    echo "$now_s" > "$WATCHDOG_ALERT_FILE"
+fi

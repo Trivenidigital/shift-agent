@@ -128,6 +128,8 @@ def test_recovery_watchdog_installed_but_not_enabled_by_default():
     assert "OnFailure=flyer-recovery-watchdog-failure.service" in service
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" in failure_service
     assert "SuccessExitStatus=5 6" in failure_service
+    # PR3: a watchdog's own unit failure pages P1, not an emergency siren.
+    assert "--priority 1 " in failure_service and "--priority 2" not in failure_service
     assert "/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/flyer-recovery-watchdog" in service
     assert "/etc/systemd/system/flyer-recovery-watchdog.service" in smoke
     assert "/etc/systemd/system/flyer-recovery-watchdog.timer" in smoke

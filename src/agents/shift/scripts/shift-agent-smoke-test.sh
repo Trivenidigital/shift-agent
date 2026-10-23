@@ -877,22 +877,36 @@ else
     echo "✓ Pushover channel working"
 fi
 
-# 8. systemd units enabled
-for unit in \
-    hermes-gateway \
-    shift-agent-tail-logger.timer \
-    shift-agent-health.timer \
-    shift-agent-health-watchdog.timer \
-    shift-agent-backup.timer \
-    shift-agent-fsck.timer \
-    send-daily-brief.timer \
-    catering-pattern-report.timer \
-    catering-lead-ttl-sweep.timer \
-    catering-proposal-expiry-sweep.timer \
-    flyer-source-edit-sla-watchdog.timer \
-    alert-integrity-watchdog.timer \
-    check-corrupt-state.timer \
-    send-routing-accuracy-summary.timer; do
+# 8. systemd units enabled — the timer list mirrors EXACTLY the timers
+# shift-agent-deploy.sh enables unconditionally. Timers deploy deliberately
+# leaves disabled (shift-agent-skills-audit, openrouter-balance-check,
+# catering-followup-sweep) or state-preserves (flyer-recovery-watchdog) are
+# NOT listed. shift-agent-proposal-sweep.timer is enabled only when the tarball
+# ships the sweep, so it is checked under the same guard below.
+smoke_enabled_units=(
+    hermes-gateway
+    shift-agent-tail-logger.timer
+    shift-agent-health.timer
+    shift-agent-health-watchdog.timer
+    shift-agent-backup.timer
+    shift-agent-fsck.timer
+    send-daily-brief.timer
+    catering-pattern-report.timer
+    catering-lead-ttl-sweep.timer
+    catering-proposal-expiry-sweep.timer
+    eod-reconcile.timer
+    send-routing-accuracy-summary.timer
+    flyer-source-edit-sla-watchdog.timer
+    alert-integrity-watchdog.timer
+    check-corrupt-state.timer
+    prune-expense-receipts.timer
+    check-compliance-deadlines.timer
+    hermes-version-check.timer
+)
+if [ -f /opt/shift-agent/proposal_sweep.py ]; then
+    smoke_enabled_units+=( shift-agent-proposal-sweep.timer )
+fi
+for unit in "${smoke_enabled_units[@]}"; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
         exit 1
@@ -926,6 +940,17 @@ fi
 if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service ]; then
     sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service )
 fi
+# Platform watchdogs + their OnFailure= pagers (guarded: absent after a rollback
+# below the tarball that shipped them).
+for _pw_unit in \
+    alert-integrity-watchdog.service \
+    alert-integrity-watchdog-failure.service \
+    check-corrupt-state.service \
+    check-corrupt-state-failure.service; do
+    if [ -f "/etc/systemd/system/${_pw_unit}" ]; then
+        sd_verify_units+=( "/etc/systemd/system/${_pw_unit}" )
+    fi
+done
 # No-response escalation sweep units (guarded: absent after a rollback below the sweep tarball).
 if [ -f /etc/systemd/system/shift-agent-proposal-sweep.service ]; then
     sd_verify_units+=( /etc/systemd/system/shift-agent-proposal-sweep.service )

@@ -381,9 +381,14 @@ def test_deploy_installs_and_enables_sla_watchdog_timer():
     assert "flyer-source-edit-sla-watchdog.timer" in smoke
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/flyer-source-edit-sla-watchdog" in watchdog_service
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" not in watchdog_service
+    # PR3 alert hygiene: the manual-queue SLA page is P1 (no emergency siren)
+    # and re-pages a persisting breach at most every 6h.
+    assert "--repeat-minutes 360 --priority 1" in watchdog_service
+    assert "--priority 2" not in watchdog_service
     assert "EnvironmentFile=-/opt/shift-agent/.env" in failure_service
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" in failure_service
     assert "SuccessExitStatus=5 6" in failure_service
+    assert "--priority 1 " in failure_service and "--priority 2" not in failure_service
 
 
 def test_stale_manual_queue_sends_customer_update_after_customer_threshold(tmp_path):
