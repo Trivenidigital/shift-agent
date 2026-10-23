@@ -31,6 +31,31 @@ HELPER = REPO_ROOT / "src" / "platform" / "scripts" / "check-hermes-config-yaml"
 BASELINE = REPO_ROOT / "tools" / "hermes-config-yaml-baseline.txt"
 
 
+# Loadout-conformance block (plugins + gateway toolsets) mirroring the live
+# production box /root/.hermes/config.yaml as verified 2026-10-23. Appended to
+# every fixture that is meant to pass, so the original shape-gate cases keep
+# testing exactly the field they were written for.
+_LOADOUT = """plugins:
+  enabled:
+  - cf-router
+  - shift-agent-policy
+  - shift-agent-read
+platform_toolsets:
+  whatsapp:
+  - hermes-whatsapp
+  - shift_agent_read
+agent:
+  disabled_toolsets:
+  - delegation
+  - skills
+  - browser
+  - clarify
+  - terminal
+  - code_execution
+  - file
+"""
+
+
 def _write_yaml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "config.yaml"
     p.write_text(content, encoding="utf-8")
@@ -66,7 +91,7 @@ auxiliary:
   vision:
     provider: auto
     model: openai/gpt-4o-mini
-""")
+""" + _LOADOUT)
     r = _run(p)
     assert r.returncode == 0, f"stderr={r.stderr}"
     env = _envelope(r.stdout)
@@ -144,7 +169,7 @@ auxiliary:
   vision:
     provider: somerareprovider
     model: foo/bar
-""")
+""" + _LOADOUT)
     r = _run(p)
     # Advisory only — gate passes
     assert r.returncode == 0, f"stderr={r.stderr}"
@@ -168,7 +193,7 @@ auxiliary:
   vision:
     provider: main
     model: openai/gpt-4o-mini
-""")
+""" + _LOADOUT)
     r = _run(p)
     assert r.returncode == 0, f"stderr={r.stderr}"
     env = _envelope(r.stdout)
@@ -210,7 +235,7 @@ model:
   provider: openrouter
 provider_routing:
   sort: notavalidvalue
-""")
+""" + _LOADOUT)
     r = _run(p)
     assert r.returncode == 0, f"stderr={r.stderr}"
     env = _envelope(r.stdout)
@@ -227,7 +252,7 @@ def test_c7_auxiliary_vision_absent(tmp_path):
 model:
   default: openai/gpt-4o-mini
   provider: openrouter
-""")
+""" + _LOADOUT)
     r = _run(p)
     assert r.returncode == 0
     env = _envelope(r.stdout)
@@ -245,7 +270,7 @@ model:
 auxiliary:
   visoin:
     provider: openai
-""")
+""" + _LOADOUT)
     r = _run(p)
     assert r.returncode == 0, f"stderr={r.stderr}"
     env = _envelope(r.stdout)
@@ -361,3 +386,130 @@ model:
     # The fake secret must NOT appear in the JSON envelope.
     assert fake_secret not in r.stdout, "raw config value leaked into JSON stdout"
     assert fake_secret not in r.stderr, "raw config value leaked into stderr"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Loadout conformance (plugins + gateway toolset scoping).
+# Source of truth: docs/runbooks/gateway-toolset-scoping.md. A missing
+# plugin / toolset entry never errors inside Hermes — the hooks/tools just
+# vanish — so the gate is the only place this drift surfaces.
+# ─────────────────────────────────────────────────────────────────
+from check_hermes_config_yaml import (  # noqa: E402  (conftest puts src/platform on sys.path)
+    RECOMMENDED_DISABLED_TOOLSETS,
+    REQUIRED_DISABLED_TOOLSETS,
+    REQUIRED_PLUGINS,
+    REQUIRED_WHATSAPP_TOOLSETS,
+)
+
+_MODEL = """\
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+"""
+
+# Mirrors the live production box /root/.hermes/config.yaml loadout sections
+# as verified 2026-10-23 (plugins.enabled, platform_toolsets.whatsapp,
+# agent.disabled_toolsets — 7 entries, matching the runbook).
+_BOX_MIRROR = _MODEL + _LOADOUT
+
+
+def _without(content: str, entry: str) -> str:
+    """Drop exactly one `  - <entry>` list line from a fixture."""
+    line = f"  - {entry}\n"
+    assert content.count(line) == 1, entry
+    return content.replace(line, "")
+
+
+def test_loadout_box_mirror_passes_with_zero_fail(tmp_path):
+    r = _run(_write_yaml(tmp_path, _BOX_MIRROR))
+    assert r.returncode == 0, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    assert env["ok"] is True
+    assert env["missing_required"] == []
+    assert env["wrong_shape"] == []
+    assert not any("disabled_toolsets" in w for w in env["advisory_warnings"])
+
+
+def test_loadout_required_sets_match_runbook_posture():
+    assert set(REQUIRED_PLUGINS) == {"cf-router", "shift-agent-policy", "shift-agent-read"}
+    assert REQUIRED_WHATSAPP_TOOLSETS == ("shift_agent_read",)
+    assert set(REQUIRED_DISABLED_TOOLSETS) == {"terminal", "skills", "code_execution"}
+    assert set(RECOMMENDED_DISABLED_TOOLSETS) == {"delegation", "browser", "clarify", "file"}
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "gateway-toolset-scoping.md").read_text(
+        encoding="utf-8"
+    )
+    for toolset in REQUIRED_DISABLED_TOOLSETS + RECOMMENDED_DISABLED_TOOLSETS:
+        assert f"`{toolset}`" in runbook, toolset
+
+
+@pytest.mark.parametrize("plugin", REQUIRED_PLUGINS)
+def test_loadout_missing_plugin_fails(tmp_path, plugin):
+    r = _run(_write_yaml(tmp_path, _without(_BOX_MIRROR, plugin)))
+    assert r.returncode == 1, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    field_name = f"plugins.enabled:{plugin}"
+    assert env["missing_required"] == [field_name]
+    assert "silently vanish" in env["missing_reasons"][field_name]
+    assert field_name in r.stderr and "silently vanish" in r.stderr
+
+
+def test_loadout_plugins_block_absent_fails_every_plugin(tmp_path):
+    content = _BOX_MIRROR.replace(
+        "plugins:\n  enabled:\n  - cf-router\n  - shift-agent-policy\n  - shift-agent-read\n", ""
+    )
+    assert "plugins:" not in content
+    r = _run(_write_yaml(tmp_path, content))
+    assert r.returncode == 1
+    env = _envelope(r.stdout)
+    assert env["missing_required"] == [f"plugins.enabled:{p}" for p in REQUIRED_PLUGINS]
+
+
+def test_loadout_missing_shift_agent_read_toolset_fails(tmp_path):
+    content = _BOX_MIRROR.replace(
+        "  whatsapp:\n  - hermes-whatsapp\n  - shift_agent_read\n",
+        "  whatsapp:\n  - hermes-whatsapp\n",
+    )
+    r = _run(_write_yaml(tmp_path, content))
+    assert r.returncode == 1, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    field_name = "platform_toolsets.whatsapp:shift_agent_read"
+    assert env["missing_required"] == [field_name]
+    assert "all 5" in env["missing_reasons"][field_name]
+    assert field_name in r.stderr
+
+
+@pytest.mark.parametrize("toolset", REQUIRED_DISABLED_TOOLSETS)
+def test_loadout_missing_required_disabled_toolset_fails(tmp_path, toolset):
+    r = _run(_write_yaml(tmp_path, _without(_BOX_MIRROR, toolset)))
+    assert r.returncode == 1, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    field_name = f"agent.disabled_toolsets:{toolset}"
+    assert env["missing_required"] == [field_name]
+    assert "gateway-toolset-scoping.md" in env["missing_reasons"][field_name]
+
+
+@pytest.mark.parametrize("toolset", RECOMMENDED_DISABLED_TOOLSETS)
+def test_loadout_missing_recommended_disabled_toolset_is_warn_only(tmp_path, toolset):
+    r = _run(_write_yaml(tmp_path, _without(_BOX_MIRROR, toolset)))
+    assert r.returncode == 0, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    assert env["ok"] is True
+    assert env["missing_required"] == []
+    assert any(
+        f"'{toolset}'" in w and "docs/runbooks/gateway-toolset-scoping.md" in w
+        for w in env["advisory_warnings"]
+    )
+    assert "ADVISORY" in r.stderr
+
+
+def test_loadout_superset_passes(tmp_path):
+    """Extra plugins / whatsapp toolsets / disables never fail or warn."""
+    content = (_BOX_MIRROR
+               .replace("  - shift-agent-read\n", "  - shift-agent-read\n  - some-future-plugin\n")
+               .replace("  - shift_agent_read\n", "  - shift_agent_read\n  - another_toolset\n")
+               .replace("  - file\n", "  - file\n  - web\n"))
+    r = _run(_write_yaml(tmp_path, content))
+    assert r.returncode == 0, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    assert env["missing_required"] == []
+    assert not any("disabled_toolsets" in w for w in env["advisory_warnings"])

@@ -98,7 +98,7 @@ All state under `/opt/shift-agent/`. Owned by `shift-agent:shift-agent`.
 │   ├── seen-ids.json           # tail-logger dedup + offset
 │   ├── disabled.flag           # kill-switch marker
 │   ├── health.log              # last health-check output
-│   └── last-health-check-ts    # updated on green health check; watchdog reads
+│   └── last-health-check-ts    # updated on every completed health-check run; watchdog reads
 ├── logs/
 │   └── decisions.log           # NDJSON audit (current file only; rotations in /var/log/shift-agent-archive/)
 ├── backups/
@@ -615,7 +615,7 @@ Updated:
 ### 6.9 `shift-agent-health-check.sh`
 Updated:
 - `set -euo pipefail` (all bash scripts)
-- touch `state/last-health-check-ts` on green (watchdog reads this)
+- touch `state/last-health-check-ts` on every completed run, green or failing (watchdog reads this)
 - On ANY failure: call `shift-agent-notify-owner` (Pushover primary)
 - On green: curl healthchecks.io URL if configured
 - WA socket liveness via bridge `/health` endpoint (NOT send-timestamp proxy; M3 fix)

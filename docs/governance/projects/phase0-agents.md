@@ -27,7 +27,17 @@ Each member is a single dispatcher `SKILL.md` (roughly 20–30 lines) that:
    decline reply.
 
 There is no deterministic kernel, no store, no script and no timer for any
-member. Do not write a directive, a plan or an estimate that implies otherwise.
+member **except `equipment_maintenance`**, which has a store
+(`EquipmentItemsFile` in `src/platform/schemas.py`, persisted at
+`state/equipment-items.json`), an operator seed script
+(`src/agents/equipment_maintenance/scripts/add-equipment-item.py`) and a
+read tool (`get_equipment_maintenance_due` in `src/plugins/shift-agent-read`).
+Do not write a directive, a plan or an estimate that implies otherwise.
+
+On the current production loadout the `SKILL.md` self-decline above does not
+execute: the gateway has the `skills` and `terminal` toolsets disabled
+(`docs/runbooks/gateway-toolset-scoping.md`), so no `SKILL.md` is an execution
+path (see `docs/hermes-alignment.md`, "LLM call pattern").
 
 ## Rules for this family
 
