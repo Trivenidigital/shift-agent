@@ -1,0 +1,19 @@
+[Unit]
+Description=Notify owner when the corrupt-state quarantine watchdog fails
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=-/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+Environment=TZ=UTC
+ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner
+ExecStart=/usr/local/bin/shift-agent-notify-owner --title "Corrupt-state watchdog failed" --priority 1 "The corrupt-state quarantine watchdog failed, so quarantined state files may go unnoticed. Check journalctl -u check-corrupt-state.service and systemctl status check-corrupt-state.service."
+SuccessExitStatus=5 6
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true

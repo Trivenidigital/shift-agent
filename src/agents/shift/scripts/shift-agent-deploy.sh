@@ -2248,18 +2248,30 @@ post_install_gates_and_restart() {
             echo "skip scrub (module absent — rollback)"
         fi
 
-        # Pre-restart cf-router compile gate: hooks.py is imported by the
-        # gateway at startup, so a syntax error can make systemctl restart
-        # fail before the post-restart smoke/rollback path gets control.
-        if ! "$VENV_PY" - <<'PY' > /dev/null; then
+        # Pre-restart plugin compile gate: every plugin under the staged
+        # src/plugins/ (cf-router, shift-agent-policy, shift-agent-read) is
+        # imported by the gateway at startup, so a syntax error in ANY of them
+        # can make systemctl restart fail (or silently drop that plugin's
+        # tools/hooks) before the post-restart smoke/rollback path gets control.
+        # Compiles the installed copies (install_artifacts rsyncs staged
+        # src/plugins/ -> /root/.hermes/plugins/ with --delete).
+        if ! "$VENV_PY" - "$STAGING/src/plugins" <<'PY' > /dev/null; then
+import sys
 from pathlib import Path
-for p in [
-    Path('/root/.hermes/plugins/cf-router/actions.py'),
-    Path('/root/.hermes/plugins/cf-router/hooks.py'),
-]:
+installed = Path('/root/.hermes/plugins')
+files = [
+    installed / 'cf-router' / 'actions.py',
+    installed / 'cf-router' / 'hooks.py',
+]
+for staged in sorted(d for d in Path(sys.argv[1]).iterdir() if d.is_dir()):
+    target = installed / staged.name
+    if not target.is_dir():
+        raise SystemExit(f'plugin {staged.name} staged but not installed at {target}')
+    files.extend(sorted(target.rglob('*.py')))
+for p in files:
     compile(p.read_text(), str(p), 'exec')
 PY
-            echo "FAIL: pre-restart cf-router compile gate - refusing to restart hermes-gateway" >&2
+            echo "FAIL: pre-restart plugin compile gate (cf-router/shift-agent-policy/shift-agent-read) - refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 revert_shift_tree
                 # Evict the broken tarball from the rotation so next deploy
@@ -2267,9 +2279,9 @@ PY
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             else
                 /usr/local/bin/shift-agent-notify-owner \
-                    --title "Deploy FAILED at pre-restart cf-router compile gate, no prior tarball" \
+                    --title "Deploy FAILED at pre-restart plugin compile gate, no prior tarball" \
                     --priority 2 \
-                    "Deploy $NEW_TAG failed pre-restart cf-router actions/hooks compile check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                    "Deploy $NEW_TAG failed pre-restart plugin compile check (src/plugins/*). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
                 # Evict the broken tarball from the rotation so it isn't surfaced
                 # as a rollback candidate on the next deploy.
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"

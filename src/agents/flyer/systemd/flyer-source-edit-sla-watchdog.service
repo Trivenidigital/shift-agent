@@ -12,7 +12,7 @@ EnvironmentFile=/opt/shift-agent/.env
 Environment=HOME=/opt/shift-agent
 Environment=TZ=UTC
 ExecStartPre=/usr/bin/test -x /usr/local/bin/flyer-source-edit-sla-watchdog
-ExecStart=/usr/local/bin/flyer-source-edit-sla-watchdog --threshold-minutes 10 --repeat-minutes 60 --priority 2
+ExecStart=/usr/local/bin/flyer-source-edit-sla-watchdog --threshold-minutes 10 --repeat-minutes 360 --priority 1
 StandardOutput=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
 StandardError=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
 
