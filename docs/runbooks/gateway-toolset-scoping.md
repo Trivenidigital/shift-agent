@@ -82,7 +82,30 @@ ruling must satisfy — listed so the bar is known in advance, not to grant it:
   `config.yaml.bak-skillmanage-20260721`, `.bak-loadout-20260721`,
   `.bak-loadout2-20260721`. Restoring a backup is the fastest full rollback.
 - **The shape gate** (`check-hermes-config-yaml`) must pass after any edit — it
-  runs in the deploy and can be run standalone before restart.
+  runs in the deploy and can be run standalone before restart. It FAILs when
+  `terminal`, `skills` or `code_execution` is missing from `disabled_toolsets`, when
+  `cf-router`, `shift-agent-policy` or `shift-agent-read` is missing from
+  `plugins.enabled`, or when `shift_agent_read` is missing from
+  `platform_toolsets.whatsapp`; a missing `delegation`, `browser`, `clarify` or
+  `file` disable is a WARN only. A FAIL blocks the deploy at the pre-install step
+  (no state changed) and also fails the post-restart smoke test, which auto-rolls
+  back and has no override. Because of that smoke step, a deliberate re-enable of
+  `terminal`, `skills` or `code_execution` must first change the gate's required
+  set in code (`REQUIRED_DISABLED_TOOLSETS` in
+  `src/platform/check_hermes_config_yaml.py`); the one-run override below only
+  clears the pre-install step.
+- **Plugin kill switch vs. the gate.** Removing a plugin from `plugins.enabled` as an
+  emergency stop makes the next deploy (and any rollback) FAIL that gate. To deploy
+  with the kill switch still engaged, set BOTH `HERMES_CONFIG_GATE_OVERRIDE_FIELD` to
+  the exact failing field (e.g. `plugins.enabled:shift-agent-read`) and a non-empty
+  `HERMES_CONFIG_GATE_OVERRIDE_REASON`; `tools/check-hermes-config-yaml.sh` accepts
+  the override for that run only if the field matches one of the run's actual
+  failures (otherwise `ATTESTATION MISMATCH`, exit 1; only one of the two set →
+  `incomplete`, exit 1), and records every failing field to
+  `/opt/shift-agent/logs/config-gate-overrides.log` and `log-decision-direct`. The
+  override only covers the deploy/rollback wrapper: the post-restart smoke test
+  re-runs the same check with no override and will fail (triggering auto-rollback),
+  so a deploy with a plugin kill switch engaged needs that smoke step accounted for.
 - No deploy is required for a config-only change (config is operator-managed), but
   the change should be recorded in the approvals log.
 
@@ -103,6 +126,6 @@ After any change to `disabled_toolsets`:
 
 These disables live only in the on-box `config.yaml`, which is operator-managed and
 not repo-tracked. They persist across deploys (the deploy never writes the file) but
-would be lost on a from-scratch box rebuild from a config template. A follow-up
-could have the shape gate assert the hazard-class toolsets stay disabled; that is a
-separate proposal, not part of this runbook.
+would be lost on a from-scratch box rebuild from a config template. The shape gate
+now asserts the hazard-class toolsets (`terminal`, `skills`, `code_execution`) stay
+disabled, so such a rebuild fails the next deploy instead of drifting silently.
