@@ -10,6 +10,7 @@ in addition to check-safe-io-symbols. PR-D1 R3-H-Gate1.
 Required names (catering apply-script + reconcile script depend on each):
 - log_config_load_failed_best_effort (PR-D1 — config-load observability)
 - log_quote_sent_lead_missing_best_effort (PR-D1 — post-bridge divergence)
+- record_audit_emit_failure (fleet audit integrity — cf-router swallowed-emit trace)
 
 Adding a new chokepoint helper that scripts depend on?  Add the name
 here AND a corresponding callsite test that exercises it.  Smoke gate
@@ -23,6 +24,7 @@ import sys
 REQUIRED_SYMBOLS = (
     "log_config_load_failed_best_effort",
     "log_quote_sent_lead_missing_best_effort",
+    "record_audit_emit_failure",
 )
 
 

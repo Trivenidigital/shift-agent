@@ -130,6 +130,31 @@ def _ensure_platform_path() -> None:
         sys.path.insert(0, p)
 
 
+def _record_audit_emit_failure(
+    source: str,
+    intended_type: str,
+    error: BaseException,
+    intended_reason: Optional[str] = None,
+) -> None:
+    """§12a: give a swallowed audit write a durable `audit_emit_failed` row via
+    audit_helpers.record_audit_emit_failure (same LOG_PATH chokepoint). Called
+    from inside the `except` of every best-effort emitter, after its stderr
+    line. Imported lazily — the platform path is only on sys.path at call time —
+    and fully guarded: an audit failure must never block the inbound."""
+    try:
+        _ensure_platform_path()
+        import audit_helpers  # type: ignore
+        audit_helpers.record_audit_emit_failure(
+            source=source,
+            intended_type=intended_type,
+            error=error,
+            intended_reason=intended_reason,
+            log_path=LOG_PATH,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _ensure_local_src_path() -> None:
     """Allow local tests to import repo modules when plugin is loaded directly."""
     src = Path(__file__).resolve().parents[2]
@@ -1831,6 +1856,8 @@ def audit_flyer_hermes_intent_decision(
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: flyer intent audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_flyer_hermes_intent_decision", "flyer_hermes_intent_decision", e)
 
 
 # === Flyer intent shadow LLM classifier (B1) ===
@@ -2337,6 +2364,7 @@ def audit_raw_body(event: Any, chat_id: str, message_id: str, text: str) -> None
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:  # noqa: BLE001
         print(f"cf-router audit_raw_body failed (non-fatal): {e}", file=sys.stderr)
+        _record_audit_emit_failure("cf-router.audit_raw_body", "cf_router_raw_body", e)
 
 
 def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
@@ -2368,6 +2396,8 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_intercepted", "cf_router_intercepted", e, intended_reason=reason)
 
 
 def identify_sender_metadata(identifier: str) -> dict:
@@ -2446,6 +2476,8 @@ def audit_dispatcher_routed(
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: dispatcher_routed audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_dispatcher_routed", "dispatcher_routed", e)
 
 
 def invoke_parse_menu_photo(
@@ -2617,6 +2649,8 @@ def audit_source_vs_new(
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: source_vs_new audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_source_vs_new", "flyer_source_vs_new_chosen", e)
 
 
 # === F7 path: catering-dispatcher-watchdog (PR-CF7) ===
@@ -4242,6 +4276,9 @@ def finalize_flyer_intake_bypass_shadow(*, hook_result: Optional[dict] = None) -
             f"cf-router: flyer_intake_bypass_outcome unknown_exit fallback emit "
             f"failed (non-fatal): {type(e).__name__}: {e}\n"
         )
+        _record_audit_emit_failure(
+            "cf-router.finalize_flyer_intake_bypass", "flyer_intake_bypass_outcome", e,
+            intended_reason="unknown_exit")
 
 
 def note_flyer_intake_bypass_active(
@@ -4311,6 +4348,9 @@ def audit_flyer_intake_bypassed(
             f"cf-router: flyer_intake_bypassed emit failed (non-fatal): "
             f"{type(e).__name__}: {e}\n"
         )
+        _record_audit_emit_failure(
+            "cf-router.audit_flyer_intake_bypassed", "flyer_intake_bypassed", e,
+            intended_reason=bypass_reason)
 
 
 def extract_flyer_request_after_confirm(text: str) -> str:
@@ -8359,6 +8399,8 @@ def audit_dispatcher_watchdog_fired(*, chat_id: str, message_id: str,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router F7: fired-audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_dispatcher_watchdog_fired", "catering_dispatcher_watchdog_fired", e)
 
 
 def audit_dispatcher_watchdog_suppressed(*, chat_id: str, message_id: str,
@@ -8385,6 +8427,9 @@ def audit_dispatcher_watchdog_suppressed(*, chat_id: str, message_id: str,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router F7: suppressed-audit emit failed (non-fatal): {e}\n")
+        _record_audit_emit_failure(
+            "cf-router.audit_dispatcher_watchdog_suppressed",
+            "catering_dispatcher_watchdog_suppressed", e, intended_reason=reason)
 
 
 def f7_rescue_check(text: str, chat_id: str, message_id: str,
