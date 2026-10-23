@@ -892,7 +892,8 @@ for unit in \
     flyer-source-edit-sla-watchdog.timer \
     alert-integrity-watchdog.timer \
     check-corrupt-state.timer \
-    send-routing-accuracy-summary.timer; do
+    send-routing-accuracy-summary.timer \
+    fleet-readiness-report.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
         exit 1
@@ -913,6 +914,9 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary.service
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
+    /etc/systemd/system/fleet-readiness-report.service
+    /etc/systemd/system/fleet-readiness-report.timer
+    /etc/systemd/system/fleet-readiness-report-failure.service
     /etc/systemd/system/flyer-recovery-watchdog.service
     /etc/systemd/system/flyer-recovery-watchdog.timer
     /etc/systemd/system/flyer-recovery-watchdog-failure.service

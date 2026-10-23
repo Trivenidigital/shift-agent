@@ -4756,6 +4756,30 @@ class HealthCheckFailure(_BaseEntry):
     detail: str
 
 
+class FleetReadinessReport(_BaseEntry):
+    """One row per fleet-readiness-report run (PR2 Fleet Sentinel, 2026-10-23).
+
+    Written by `fleet-readiness-report` after it computes per-agent status from
+    the declarative FLEET table in `fleet_readiness.py`. Aggregate counts and
+    agent ids ONLY — never phones, LIDs, chat ids or message text; the full
+    per-agent report lives at `report_path`. Additive tag: a rollback target
+    routes it to `_UnknownLogEntry` (extra="allow")."""
+    type: Literal["fleet_readiness_report"]
+    generated_at: datetime
+    agents_total: int = Field(ge=0)
+    by_status: dict[str, int]
+    regressions: list[str] = Field(default_factory=list)  # agent ids
+    audit_emit_failed_count: int = Field(ge=0)
+    report_path: str = Field(min_length=1, max_length=500)
+
+    @field_validator("generated_at")
+    @classmethod
+    def _generated_at_tz_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("generated_at must be timezone-aware")
+        return v
+
+
 class OwnerNotificationSuppressed(_BaseEntry):
     """Quiet-hours guard suppressed a non-critical Pushover/WhatsApp send
     (Agent #41 v0.1). Emitted by shift-agent-notify-owner before the
@@ -8595,6 +8619,8 @@ LogEntry = Annotated[
         Annotated[CateringQuoteVersionCommitted, Tag("catering_quote_version_committed")],
         Annotated[CateringQuoteLedgerAppendFailed, Tag("catering_quote_ledger_append_failed")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
+        # PR2 Fleet Sentinel 2026-10-23: daily per-agent readiness report
+        Annotated[FleetReadinessReport, Tag("fleet_readiness_report")],
         # Agent #41 Owner Wellbeing v0.1
         Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
         Annotated[OwnerAlertDispatched, Tag("owner_alert_dispatched")],
@@ -9012,7 +9038,7 @@ __all__ = [
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "ValidateFailed", "InvariantViolation",
-    "ApprovalCodeCollisionDetected", "HealthCheckFailure",
+    "ApprovalCodeCollisionDetected", "HealthCheckFailure", "FleetReadinessReport",
     "CateringAmendmentRecord", "CateringAmendmentStore",
     "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
     "CateringAmendmentApplied", "CateringLeadQualificationUpdated",

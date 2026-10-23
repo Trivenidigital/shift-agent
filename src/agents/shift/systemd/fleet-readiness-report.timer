@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily per-agent fleet readiness report (PR2 Fleet Sentinel)
+
+[Timer]
+# DAILY at 07:10 UTC (service sets TZ=UTC). The cadence is load-bearing: each
+# run appends one fleet_readiness_report row to decisions.log, so a frequent
+# timer would keep decisions.log's mtime fresh and silently disable the
+# alert-integrity-watchdog "Audit log STALE" check (120-min threshold).
+# tests/test_fleet_readiness_units.py pins this interval. Persistent=true: a
+# report missed while the box was down runs once at boot.
+OnCalendar=*-*-* 07:10:00
+Persistent=true
+Unit=fleet-readiness-report.service
+
+[Install]
+WantedBy=timers.target

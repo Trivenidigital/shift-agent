@@ -1,0 +1,138 @@
+#!/usr/local/lib/hermes-agent/venv/bin/python
+"""fleet-readiness-report - daily per-agent readiness report (PR2 Fleet Sentinel).
+
+Computes one status per src/agents/* directory from the declarative FLEET table
+in fleet_readiness.py (config.yaml + state dir + systemd + 7 days of
+decisions.log, live and rotated archive), then:
+
+  - writes <state-dir>/fleet-readiness-last.json (the baseline the next run
+    diffs against), and
+  - appends ONE `fleet_readiness_report` row to decisions.log (aggregate counts
+    and agent ids only).
+
+REPORT-ONLY: regressions are computed and printed but nobody is paged. The first
+run (no previous report) is `mode=baseline` with no regressions.
+
+Usage:
+  fleet-readiness-report                 # JSON to stdout, writes report + row
+  fleet-readiness-report --text          # human-readable
+  fleet-readiness-report --no-write      # dry run: nothing written
+
+Exit codes: 0 report produced (whatever the statuses say — observability, not a
+gate); 2 usage error; 1 the report file or audit row could not be written.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+try:
+    _SRC = Path(__file__).resolve().parents[3]
+    if (_SRC / "platform" / "schemas.py").exists():
+        sys.path.insert(0, str(_SRC / "platform"))
+        sys.path.insert(0, str(_SRC))
+except Exception:
+    pass
+
+sys.path.insert(0, "/opt/shift-agent")
+
+from pydantic import TypeAdapter  # noqa: E402
+
+import fleet_readiness as fr  # noqa: E402
+from exit_codes import EXIT_GENERIC_ERROR, EXIT_OK  # noqa: E402
+from safe_io import FileLock, atomic_write_json, ndjson_append  # noqa: E402
+from schemas import FleetReadinessReport  # noqa: E402
+
+_ROW_ADAPTER = TypeAdapter(FleetReadinessReport)
+
+
+def _load_previous(path: Path) -> Optional[dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_now(value: str) -> datetime:
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Per-agent fleet readiness report (report-only).")
+    parser.add_argument("--config", type=Path, default=fr.DEFAULT_CONFIG_PATH)
+    parser.add_argument("--state-dir", type=Path, default=fr.DEFAULT_STATE_DIR)
+    parser.add_argument(
+        "--decisions-log", type=Path,
+        default=Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", str(fr.DEFAULT_DECISIONS_LOG))),
+    )
+    parser.add_argument("--archive-dir", type=Path, default=fr.DEFAULT_ARCHIVE_DIR)
+    parser.add_argument("--text", action="store_true", help="render human-readable output")
+    parser.add_argument("--no-write", action="store_true",
+                        help="dry run: do not write the report file or the audit row")
+    parser.add_argument("--now", default="", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    now = _parse_now(args.now) if args.now else datetime.now(timezone.utc)
+    report_path = args.state_dir / fr.REPORT_FILENAME
+    previous = _load_previous(report_path)
+
+    facts = fr.collect_facts(
+        config_path=args.config,
+        state_dir=args.state_dir,
+        decisions_log=args.decisions_log,
+        archive_dir=args.archive_dir,
+        now=now,
+    )
+    report = fr.build_report(facts, previous)
+    report["report_path"] = str(report_path)
+
+    # graduation: arm P1 regression page after 7 consecutive clean daily runs
+    # (zero spurious regressions, recorded in the deploy record). Until then this
+    # script is REPORT-ONLY: `report["regressions"]` is printed and audited, and
+    # the page — notify_owner_with_fallback(priority=1), deduped — goes HERE.
+
+    if not args.no_write:
+        try:
+            atomic_write_json(report_path, report)
+            row = FleetReadinessReport(
+                type="fleet_readiness_report",
+                ts=now,
+                generated_at=now,
+                agents_total=report["agents_total"],
+                by_status=report["by_status"],
+                regressions=report["regressions"],
+                audit_emit_failed_count=report["audit_emit_failed_count"],
+                report_path=str(report_path),
+            )
+            line = _ROW_ADAPTER.dump_json(row).decode("utf-8")
+            args.decisions_log.parent.mkdir(parents=True, exist_ok=True)
+            with FileLock(Path(str(args.decisions_log) + ".lock")):
+                ndjson_append(args.decisions_log, line)
+        except Exception as exc:  # noqa: BLE001 - IO failure must exit non-zero
+            print(json.dumps({
+                "event": "fleet_readiness_write_failed",
+                "error": f"{type(exc).__name__}: {exc}"[:300],
+            }), file=sys.stderr)
+            return EXIT_GENERIC_ERROR
+
+    if args.text:
+        print(fr.render_text(report))
+    else:
+        print(json.dumps(report, sort_keys=True))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
