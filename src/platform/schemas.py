@@ -6558,6 +6558,22 @@ class ConfigLoadFailed(_BaseEntry):
     script_name: str = Field(min_length=1, max_length=80)
 
 
+class AuditEmitFailed(_BaseEntry):
+    """§12a: a best-effort audit write was swallowed (schema ValidationError, I/O
+    error) at a site that must never block the inbound it was auditing. Emitted
+    by audit_helpers.record_audit_emit_failure so the swallow leaves a durable
+    trace instead of a stderr line nobody reads.
+
+    METADATA ONLY: `detail` carries error locations / classes, never message
+    text or phone numbers (the helper scrubs digit runs defensively)."""
+    type: Literal["audit_emit_failed"]
+    source: str = Field(min_length=1, max_length=64)        # e.g. "cf-router.audit_intercepted"
+    intended_type: str = Field(min_length=1, max_length=64)  # the LogEntry type that was lost
+    intended_reason: Optional[str] = Field(default=None, max_length=64)
+    error_class: str = Field(min_length=1, max_length=64)
+    detail: str = Field(default="", max_length=500)
+
+
 class CateringLeadManuallyReconciled(_BaseEntry):
     """PR-D1: emitted by catering-lead-reconcile script (PR-D2). Distinguishes
     operator intervention from automated state advance (which uses
@@ -8724,6 +8740,8 @@ LogEntry = Annotated[
         Annotated[CfRouterRawBody, Tag("cf_router_raw_body")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
+        # Fleet audit integrity 2026-10-23: trace row for a swallowed audit emit.
+        Annotated[AuditEmitFailed, Tag("audit_emit_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
         Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
         Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
@@ -9093,6 +9111,8 @@ __all__ = [
     "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
     # PR-CF5 2026-05-03 (state-file migration)
     "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
+    # Fleet audit integrity 2026-10-23
+    "AuditEmitFailed",
     # PR-CF6 2026-05-03 (cf-router Hermes plugin; supersedes F8 + F9)
     "CfRouterIntercepted", "_UnknownReasonCfRouterIntercepted",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
