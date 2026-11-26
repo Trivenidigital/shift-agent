@@ -601,6 +601,128 @@ def _notify_owner_of_candidate_verdict(
         pass
 
 
+SHIFT_CANDIDATE_REPLY_OWNER_PAGE_ENV = "SHIFT_CANDIDATE_REPLY_OWNER_PAGE"
+SHIFT_CANDIDATE_REPLY_OWNER_PAGE_CHATS_ENV = "SHIFT_CANDIDATE_REPLY_OWNER_PAGE_CHATS"
+_CANDIDATE_REPLY_QUOTE_CHARS = 200
+_CANDIDATE_REPLY_THROTTLE_KIND = "shift_candidate_reply"
+
+
+def _candidate_reply_owner_page_allowlisted(chat_id: str) -> bool:
+    """Empty/unset => nobody; a literal '*' => everybody; otherwise a raw or
+    canonical-identity match. Same semantics as the catering discriminator's
+    allowlist, built read-only from the existing actions normalisers."""
+    raw = os.environ.get(SHIFT_CANDIDATE_REPLY_OWNER_PAGE_CHATS_ENV, "") or ""
+    allow = {n for n in (actions._normalize_flyer_intent_chat(c) for c in raw.split(",")) if n}
+    if not allow:
+        return False
+    if "*" in allow:
+        return True
+    if actions._normalize_flyer_intent_chat(chat_id) in allow:
+        return True
+    canonical = actions.flyer_canonical_identity_key(chat_id)
+    return bool(canonical) and actions._normalize_flyer_intent_chat(canonical) in allow
+
+
+def _try_candidate_reply_owner_page(*, text: str, chat_id: str) -> None:
+    """Page the owner about a coverage reply the code cannot record.
+
+    Covers the two replies `_try_candidate_response` leaves on the floor: a
+    non-English answer (the classifier is English-only by design) and a
+    sick-call-shaped refusal F9 pre-empts. The owner is paged in real time with
+    the reply quoted, instead of hearing only from the 30-minute no-response
+    sweep.
+
+    DETERMINISTIC: no model call; the page is a fixed f-string with the
+    sanitised reply quoted last. Sends nothing to the employee and changes no
+    state — the proposal stays `sent`, so the 30-minute no-response sweep still
+    fires afterwards. Always returns None; routing is unchanged.
+
+    Gates, in order: flag off (env only, no I/O before it); chat not
+    allowlisted; sender is the owner (an owner who is also the candidate must
+    not page herself); empty text; not exactly one `sent` proposal for this
+    candidate (zero = nothing awaits her answer; two = the page could not name
+    the shift); this proposal already paged within the shared cf-router alert
+    throttle window (`was_recently_alerted`, keyed by proposal_id — at most one
+    page per proposal per ALERT_THROTTLE_SEC, persisted in the existing
+    throttle file).
+
+    Everything after the flag/allowlist check is guarded: nothing here may
+    raise into `_pre_gateway_dispatch_impl` and change the turn's routing.
+    """
+    if os.environ.get(SHIFT_CANDIDATE_REPLY_OWNER_PAGE_ENV, "") != "1":
+        return None
+    if not _candidate_reply_owner_page_allowlisted(chat_id):
+        return None
+    try:
+        if actions.is_owner_chat(chat_id):
+            return None
+        if not (text or "").strip():
+            return None
+        proposal_ids = actions.sent_proposal_ids_for_candidate(chat_id)
+        if len(proposal_ids) != 1:
+            return None
+        proposal_id = proposal_ids[0]
+        if actions.was_recently_alerted(proposal_id, kind=_CANDIDATE_REPLY_THROTTLE_KIND):
+            return None
+        actions.audit_intercepted(
+            reason="shift_candidate_reply_owner_paged",
+            chat_id=chat_id,
+            detail=f"proposal_id={proposal_id}; page_attempted=true",
+        )
+        _page_owner_with_candidate_reply(text, actions.proposal_notify_fields(proposal_id))
+        actions.mark_alerted(proposal_id, kind=_CANDIDATE_REPLY_THROTTLE_KIND)
+    except Exception as exc:  # noqa: BLE001 — advisory arm; never alter routing
+        actions.sys.stderr.write(
+            f"cf-router: candidate reply owner page failed (non-fatal): {exc}\n")
+    return None
+
+
+_PAGE_WHITESPACE_CONTROLS = frozenset("\t\n\r\v\f\x1c\x1d\x1e\x1f\x85")
+
+
+def _sanitize_candidate_page_text(value: Any, limit: int) -> str:
+    """One-line, quote-free, control-free text for the owner page.
+
+    Drops C0/C1 controls and Unicode format characters (Cc/Cf — ESC, NUL, the
+    bidi overrides such as U+202E), turns whitespace-like controls into a space,
+    collapses runs of whitespace, replaces `"` with `'` so quoted text cannot
+    close its own quotes, and truncates. NUL in particular makes the Pushover
+    subprocess raise."""
+    import unicodedata
+    out = []
+    for ch in str(value or ""):
+        if ch in _PAGE_WHITESPACE_CONTROLS:
+            out.append(" ")
+        elif unicodedata.category(ch) in ("Cc", "Cf"):
+            continue
+        else:
+            out.append(ch)
+    return " ".join("".join(out).split()).replace('"', "'")[:limit]
+
+
+def _page_owner_with_candidate_reply(text: str, fields: dict) -> None:
+    """Deterministic f-string page: facts first, the sanitised reply LAST, so
+    injected text can never precede the fixed sentence. Best-effort, same guard
+    as `_notify_owner_of_candidate_verdict`."""
+    who = fields.get("candidate_name") or "The chosen replacement"
+    role = fields.get("absent_role") or "the"
+    date = fields.get("absent_date") or "the requested date"
+    shift = fields.get("absent_shift") or ""
+    when = f"{date} ({shift})" if shift else date
+    reply = _sanitize_candidate_page_text(text, _CANDIDATE_REPLY_QUOTE_CHARS)
+    try:
+        actions.fire_pushover_alert(
+            "Coverage reply needs your eyes",
+            (f"{who} replied to the coverage request for the {role} shift on "
+             f"{when}, but the reply was not a plain YES or NO, so nothing was "
+             f"recorded — the request is still open. Please confirm with {who} "
+             f'directly. Their words: "{reply}"'),
+            priority=1,
+        )
+    except Exception:  # noqa: BLE001 — an alert outage must not fail the turn
+        pass
+
+
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
 # patterns were removed because F9 now skips the LLM and invokes Shift directly.
@@ -805,6 +927,11 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             and actions.is_verified_employee_chat(chat_id)
         ):
             if actions.has_pending_candidate_response(chat_id):
+                # Still a double no-op for ROUTING. When the owner page is
+                # armed the owner is paged with the reply; it returns None and
+                # this arm returns, so the candidate arm below cannot page a
+                # second time for the same turn.
+                _try_candidate_reply_owner_page(text=text, chat_id=chat_id)
                 return None
             _try_f9_alert(text, chat_id)
             actions.audit_dispatcher_routed(
@@ -847,18 +974,29 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # decides it above: when the sender has a pending coverage ask it
         # returns None and neither branch acts.
         #
-        # KNOWN RESIDUAL, and it is not small: that F9 guard is a DOUBLE no-op,
-        # so the most natural refusals — "cant come", "can't make it", "unable
-        # to work", "no im sick" — still record nothing and still draw the false
-        # 30-minute page. The classifier below would decline every one of them.
-        # This branch therefore closes the loop for plain YES/NO replies and NOT
-        # for sick-call-shaped ones. Fixing it means deciding which arm owns an
-        # ambiguous message, which is a routing ruling, not a parser change.
+        # KNOWN RESIDUAL, narrowed but not closed: that F9 guard is a DOUBLE
+        # no-op, so the most natural refusals — "cant come", "can't make it",
+        # "unable to work", "no im sick" — still record nothing. The same holds
+        # for every non-English reply (Telugu/Hindi/Gujarati/Tamil), which the
+        # English-only classifier below declines to read.
+        #
+        # COVERED when SHIFT_CANDIDATE_REPLY_OWNER_PAGE is armed for the chat:
+        # the owner is paged in real time with the quoted reply by a
+        # deterministic page, no model (`_try_candidate_reply_owner_page`,
+        # called from the F9 guard above and after the deterministic branch
+        # below). STILL OPEN either way: nothing is recorded, the proposal
+        # stays `sent`, so the 30-minute no-response sweep still fires; and the
+        # candidate gets no acknowledgement. Recording these
+        # means deciding which arm owns an ambiguous message, which is a
+        # routing ruling, not a parser change.
         # Pinned by test_f9_preempts_sick_call_shaped_declines_end_to_end.
         candidate_result = _try_candidate_response(
             text=text, chat_id=chat_id, message_id=message_id)
         if candidate_result is not None:
             return candidate_result
+        # Owner page only; self-gates on flag/allowlist/exactly-one-sent-proposal
+        # and always returns None, so routing continues exactly as today.
+        _try_candidate_reply_owner_page(text=text, chat_id=chat_id)
 
         # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner +
         # catering classifier → intercept inside pre_gateway_dispatch and

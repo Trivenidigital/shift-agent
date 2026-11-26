@@ -7296,6 +7296,13 @@ class CfRouterIntercepted(_BaseEntry):
         # is announced (§12a). Money/authorization arms fail closed on their own
         # and never reach this row. `detail` carries the resolved identifier.
         "identity_unresolved_turn_yielded",
+        # 2026-11-25 (dormant until armed): a covering employee's reply to a
+        # coverage ask that the deterministic English-only classifier could not
+        # record (non-English, or sick-call-shaped and pre-empted by F9) drew a
+        # deterministic owner page quoting the reply. No model call; records
+        # NOTHING against the proposal. `detail` carries proposal_id and
+        # page_attempted; never the reply text.
+        "shift_candidate_reply_owner_paged",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
