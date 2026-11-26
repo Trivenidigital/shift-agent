@@ -1095,6 +1095,78 @@ def main() -> int:
                 }))
                 return EXIT_OK
 
+        # The headcount the PRICE was computed for must be the headcount the
+        # QUOTE states. finalize froze `pricing_inputs.guest_count`; a later
+        # amendment rewrites only `extracted.headcount`. The render multiplies
+        # the package by the first and prints the second, so approving here
+        # would send "x50 ... Headcount: 80 guests" — an underquote. Refuse
+        # before any state write or customer send, and tell the owner, exactly
+        # like the PR-CF1 refusal above. Package leads only: that is where the
+        # render (and the discount recompute) uses guest_count; an item-only
+        # quote prints item quantities and no per-guest multiplier.
+        # KNOWN UNCOVERED (not guarded here, do not assume they are):
+        #   * item-only quotes whose --auto-default basket was scaled by headcount
+        #     at finalize (qty = ceil(guest_count / serves)) — a later headcount
+        #     change leaves those quantities stale;
+        #   * stdin-path leads with no `pricing_inputs` — nothing frozen to compare
+        #     (the send price gate refuses those for missing provenance anyway).
+        _inputs = getattr(lead, "pricing_inputs", None)
+        _current_hc = lead.extracted.headcount if lead.extracted else None
+        if (
+            args.decision == "approve"
+            and _inputs is not None
+            and _inputs.package_id is not None
+            and _current_hc is not None
+            and _inputs.guest_count != _current_hc
+        ):
+            frozen_hc = _inputs.guest_count
+            sys.stderr.write(
+                f"lead {lead.lead_id} {code}: stored price is for {frozen_hc} "
+                f"guests but extracted.headcount is now {_current_hc}; refusing "
+                f"approve — re-finalize so the quote is re-priced.\n"
+            )
+            _emit_quote_skill_failed_best_effort(
+                lead.lead_id, code, "truth_guard_failed",
+                f"quote_basis_headcount_mismatch: pricing_inputs.guest_count="
+                f"{frozen_hc} != extracted.headcount={_current_hc}",
+            )
+            reprompt_delivered = False
+            if cfg.owner.self_chat_jid:
+                reprompt = (
+                    f"⚕ *Catering Agent*\n────────────\n"
+                    f"Quote not sent for {code}: the guest count changed from "
+                    f"{frozen_hc} to {_current_hc} after the customer finalized, "
+                    f"so the stored price is for {frozen_hc} guests. Nothing was "
+                    f"sent to the customer. This order has to be re-priced for "
+                    f"{_current_hc} guests before it can be approved"
+                )
+                # reject is only accepted from AWAITING_OWNER_APPROVAL /
+                # CUSTOMER_FINALIZED (see the decision match above); never offer
+                # it on an OWNER_APPROVED retry, where it would be refused.
+                if lead.status in ("AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED"):
+                    reprompt += (f' — or reply "{code} reject" to close it and '
+                                 f"start a fresh quote.")
+                else:
+                    reprompt += "."
+                try:
+                    _ok_rp, _detail_rp = _bridge_post(cfg.owner.self_chat_jid, reprompt)
+                    reprompt_delivered = bool(_ok_rp)
+                    if not _ok_rp:
+                        sys.stderr.write(
+                            f"reprompt POST refused by bridge (non-fatal): {_detail_rp}\n")
+                except Exception as e:
+                    sys.stderr.write(f"reprompt POST failed (non-fatal): {e}\n")
+            print(json.dumps({
+                "lead_id": lead.lead_id,
+                "new_status": lead.status,
+                "outbound_sent": False,
+                "refusal": "quote_basis_headcount_mismatch",
+                "priced_guest_count": frozen_hc,
+                "current_headcount": _current_hc,
+                "owner_reprompt_delivered": reprompt_delivered,
+            }))
+            return EXIT_TRUTH_GUARD_FAILED
+
         now = customer_now(cfg.customer.timezone)
         prev_status = lead.status
 

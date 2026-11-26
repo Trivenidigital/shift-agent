@@ -538,6 +538,166 @@ def test_drafted_money_cannot_override_frozen_quote(bridge, env, invented):
                for row in bridge.requests if row.get("chatId") == CUSTOMER_JID)
 
 
+# ── the headcount the price was computed for is the headcount the quote states ─
+# finalize froze `pricing_inputs.guest_count`; amend-catering-lead still accepts a
+# CUSTOMER_FINALIZED lead and rewrites only `extracted.headcount`. The render
+# prices from the first and prints the second, so an unguarded approve sent
+# "x50 ... Headcount: 80 guests" — an underquote, to a customer.
+# 50 guests x $18.00 + the $45 add-on = $945 guard basis.
+PACKAGE_LEAD_50 = ("--package-id", "veg-standard",
+                   "--selected-items-json", '[{"name":"Gulab Jamun","qty":10,"price_usd":4}]',
+                   "--quote-total-usd", "945")
+
+
+def _set_extracted_headcount(env, headcount):
+    """What amend-catering-lead does to a finalized lead: `extracted.headcount`
+    changes, `pricing_inputs`, `selected_items` and status do not."""
+    path = env / "state" / "catering-leads.json"
+    store = json.loads(path.read_text(encoding="utf-8"))
+    store["leads"][0]["extracted"]["headcount"] = headcount
+    path.write_text(json.dumps(store), encoding="utf-8")
+
+
+@pytest.mark.parametrize("entry", [
+    ("--quote-from-lead-state",),
+    ("--quote-text-stdin",),
+])
+def test_approve_refuses_when_headcount_changed_after_finalize(bridge, env, entry):
+    seed_lead(env, headcount=50)
+    assert run_finalize(env, *PACKAGE_LEAD_50)[0] == 0
+    before = read_lead(env)
+    assert before["status"] == "CUSTOMER_FINALIZED"
+    assert before["pricing_inputs"]["guest_count"] == 50
+    _set_extracted_headcount(env, 80)
+    bridge.requests.clear()
+
+    rc, out = run_apply(env, "--decision", "approve", *entry,
+                        stdin_text="Event 2026-08-15 for 80 guests.")
+
+    assert rc == 11
+    assert out["refusal"] == "quote_basis_headcount_mismatch"
+    assert out["outbound_sent"] is False
+    assert out["priced_guest_count"] == 50
+    assert out["current_headcount"] == 80
+    assert out["owner_reprompt_delivered"] is True
+    after = read_lead(env)
+    assert after["status"] == "CUSTOMER_FINALIZED"
+    assert after["pricing_inputs"] == before["pricing_inputs"]
+    assert after.get("quote_text") == before.get("quote_text")
+    assert after.get("quote_valid_until") == before.get("quote_valid_until")
+    assert not [r for r in bridge.requests if r.get("chatId") == CUSTOMER_JID], (
+        "a quote priced for 50 guests must not reach a customer who now says 80")
+    owner_msgs = [r.get("message", "") for r in bridge.requests
+                  if r.get("chatId") == OWNER_JID]
+    assert len(owner_msgs) == 1
+    assert "from 50 to 80" in owner_msgs[0] and CODE in owner_msgs[0]
+    assert "Nothing was sent to the customer" in owner_msgs[0]
+    assert "re-priced for 80 guests" in owner_msgs[0]
+    assert f'"{CODE} reject"' in owner_msgs[0], (
+        "reject is accepted from CUSTOMER_FINALIZED, so the owner is offered it")
+    assert "confirm their order again" not in owner_msgs[0]
+    assert not audit(env, "catering_quote_sent")
+    failed = audit(env, "catering_quote_skill_failed")
+    assert failed and failed[-1]["reason"] == "truth_guard_failed"
+    assert "quote_basis_headcount_mismatch" in failed[-1]["detail"]
+
+
+def test_owner_approved_retry_mismatch_does_not_offer_reject(bridge, env):
+    """reject is refused on OWNER_APPROVED, so the reprompt must not offer it."""
+    seed_lead(env, headcount=50)
+    assert run_finalize(env, *PACKAGE_LEAD_50)[0] == 0
+    path = env / "state" / "catering-leads.json"
+    store = json.loads(path.read_text(encoding="utf-8"))
+    store["leads"][0]["status"] = "OWNER_APPROVED"
+    store["leads"][0]["extracted"]["headcount"] = 80
+    path.write_text(json.dumps(store), encoding="utf-8")
+    bridge.requests.clear()
+
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    assert rc == 11 and out["refusal"] == "quote_basis_headcount_mismatch"
+    assert read_lead(env)["status"] == "OWNER_APPROVED"
+    assert not [r for r in bridge.requests if r.get("chatId") == CUSTOMER_JID]
+    owner_msgs = [r.get("message", "") for r in bridge.requests
+                  if r.get("chatId") == OWNER_JID]
+    assert len(owner_msgs) == 1
+    assert "re-priced for 80 guests" in owner_msgs[0]
+    assert "reject" not in owner_msgs[0]
+
+
+def test_real_amendment_after_finalize_blocks_the_underquote(bridge, env, monkeypatch):
+    """Witness through the REAL amend-catering-lead, not a hand-edited headcount:
+    a captured "actually 80 people" amendment is applied to the finalized lead,
+    and the approve that follows is refused."""
+    from types import SimpleNamespace
+    import catering_amendments as ca
+
+    seed_lead(env, headcount=50)
+    assert run_finalize(env, *PACKAGE_LEAD_50)[0] == 0
+    frozen = read_lead(env)["pricing_inputs"]
+    owner, group = _runner_owner()
+    amendments = env / "state" / "catering-amendments.json"
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_AMENDMENTS_PATH", str(amendments))
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+                       str(env / "state" / "catering-quote-ledger.json"))
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(env / "config.yaml"))
+    cap = ca.capture_branch_b_amendment(
+        lead={"lead_id": "L0001", "extracted": {"headcount": 50}},
+        text="actually make it 80 people not 50", chat_id="cust@lid",
+        phone="+19045550199", message_id="wamid.AM1", source_transport="whatsapp",
+        provider_timestamp=str(int(time.time())), now=datetime.now(timezone.utc),
+        data_path=amendments, expected_owner=owner, expected_group=group,
+        emit_audit=False,
+    )
+    assert cap.ok
+
+    amend = _bind_paths(load_script("mb_amend", SCRIPTS / "amend-catering-lead"), env)
+    amend.AMENDMENTS_PATH = amendments
+    monkeypatch.setattr(amend, "subprocess", SimpleNamespace(
+        run=lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr="")))
+    rc, out = _invoke(amend, ["amend-catering-lead", "--lead-id", "L0001",
+                              "--mode", "amendment", "--message-id", "wamid.AM1",
+                              "--expected-owner", owner, "--expected-group", group])
+    assert rc == 0, out
+    amended = read_lead(env)
+    assert amended["status"] == "CUSTOMER_FINALIZED"
+    assert amended["extracted"]["headcount"] == 80
+    assert amended["pricing_inputs"] == frozen, "amend must not touch the frozen price"
+    bridge.requests.clear()
+
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    assert rc == 11
+    assert out["refusal"] == "quote_basis_headcount_mismatch"
+    assert (out["priced_guest_count"], out["current_headcount"]) == (50, 80)
+    assert read_lead(env)["status"] == "CUSTOMER_FINALIZED"
+    assert not [r for r in bridge.requests if r.get("chatId") == CUSTOMER_JID]
+
+
+def test_approve_with_unchanged_headcount_is_unaffected(bridge, env):
+    seed_lead(env, headcount=50)
+    assert run_finalize(env, *PACKAGE_LEAD_50)[0] == 0
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+    assert rc == 0, out
+    assert read_lead(env)["status"] == "SENT_TO_CUSTOMER"
+    text = sent_text(bridge)
+    assert "x50" in text and "Headcount: 50 guests" in text
+
+
+def test_item_only_quote_is_not_judged_by_the_headcount_gate(bridge, env):
+    """No package: the render never prints a per-guest multiplier, so the gate
+    has nothing to compare and the approve proceeds exactly as before."""
+    seed_lead(env, headcount=150)
+    assert run_finalize(
+        env, "--selected-items-json", '[{"name":"Samosa","qty":150,"price_usd":3}]',
+        "--quote-total-usd", "375")[0] == 0
+    assert read_lead(env)["pricing_inputs"]["package_id"] is None
+    _set_extracted_headcount(env, 80)
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+    assert rc == 0, out
+    assert read_lead(env)["status"] == "SENT_TO_CUSTOMER"
+
+
 def test_discount_customer_quote_preserves_computed_cents(bridge, env):
     seed_lead(env)
     assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
