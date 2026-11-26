@@ -309,6 +309,85 @@ _VERB_APPROVE = re.compile(r"\b(approve|approved|yes|send|ok|go|send it)\b", re.
 _VERB_REJECT = re.compile(r"\b(reject|rejected|no|decline|pass|cancel)\b", re.IGNORECASE)
 _VERB_EDIT = re.compile(r"\b(edit|change|modify)\b", re.IGNORECASE)
 
+# Owner approval-card verdict (`_owner_verb_verdict`). A wrong APPROVE sends a
+# priced quote to the customer, irreversibly, so approve is decided by the
+# ABSENCE of everything else (the `_classify_candidate_reply` discipline): after
+# the code and a small explicit filler set are removed, what is left must be
+# non-empty and consist ONLY of approve tokens, with no `?` anywhere.
+_OWNER_APPROVE_TOKENS = frozenset({
+    "approve", "approved", "yes", "send", "ok", "okay", "go", "👍",
+})
+# Words that carry no decision in a reply like "yes go ahead, send it to the
+# customer please". Kept small and explicit: anything not listed here survives
+# and makes the approve unclear.
+_OWNER_APPROVE_FILLER_TOKENS = frozenset({
+    "please", "pls", "it", "now", "thanks", "thank", "you", "ty", "ahead",
+    "the", "quote", "this", "that", "and", "to", "customer", "them", "looks",
+    "good", "great", "fine", "sir",
+})
+# Reject stays presence-based (its tail is usually the owner's reason: "no
+# looks wrong", "reject not interested"), but these anywhere make it a
+# deferral, not a decision: "no wait", "no, not yet", "no hold on".
+_OWNER_REJECT_DEFERRAL = re.compile(r"\b(wait|yet|hold|later)\b", re.IGNORECASE)
+# A negator only cancels a reject when it comes BEFORE the verb ("don't reject",
+# "not rejected"). After it, it is the reason ("no, not this one").
+_OWNER_REJECT_NEGATOR = re.compile(
+    r"\b(not|don't|dont|do\s+not|never)\b", re.IGNORECASE)
+
+
+def _owner_reply_body(text: str) -> str:
+    """The reply minus every approval code, with the typographic apostrophe
+    normalised. The code is not part of the wording (e.g. `#NEVER` is legal)."""
+    return _CODE_PATTERN.sub(" ", text or "").replace("’", "'")
+
+
+def _owner_reply_tokens(body: str) -> list:
+    return [t.lower().replace("'", "") for t in _CANDIDATE_WORD.findall(body)]
+
+
+def _owner_reply_attempted_decision(text: str) -> bool:
+    """True when the reply contains at least one approve or reject word, i.e.
+    the owner tried to decide. A bare code or an unrelated word is not an
+    attempt and gets no reprompt."""
+    body = _owner_reply_body(text)
+    return (any(t in _OWNER_APPROVE_TOKENS for t in _owner_reply_tokens(body))
+            or bool(_VERB_REJECT.search(body)))
+
+
+def _owner_verb_verdict(text: str) -> Optional[str]:
+    """`"approve"`, `"reject"`, or None when the owner's reply is not ONE clear verb.
+
+    THE RULE.
+    Approve: no `?`; after removing the code and _OWNER_APPROVE_FILLER_TOKENS,
+    the remaining tokens are non-empty and ALL in _OWNER_APPROVE_TOKENS.
+    Reject: a _VERB_REJECT word is present AND no `?` AND no approve token AND
+    no wait/yet/hold/later anywhere AND no not/don't/never before the verb.
+
+    Approve tests for the absence of everything else, not the presence of a
+    verb — the same discipline as `_classify_candidate_reply` and
+    `_is_unqualified_shift_consent`. Earlier revisions tested for presence:
+    first `has_approve` before `has_reject` (so `"no, don't send yet"`,
+    `"not ok"` and `"cancel, do not send"` APPROVED, and `"don't reject"`
+    rejected), then approve-word-minus-negators (so `"ok but later"`,
+    `"send it tomorrow"`, `"is this ok"` and `"go ahead if they pay advance"`
+    still APPROVED). For catering-leads an approve sends a priced quote to the
+    customer, irreversibly. None is the safe answer: the caller invokes nothing.
+    """
+    body = _owner_reply_body(text)
+    if "?" in body:
+        return None
+    tokens = _owner_reply_tokens(body)
+    remaining = [t for t in tokens if t not in _OWNER_APPROVE_FILLER_TOKENS]
+    if remaining and all(t in _OWNER_APPROVE_TOKENS for t in remaining):
+        return "approve"
+    reject_match = _VERB_REJECT.search(body)
+    if (reject_match is not None
+            and not any(t in _OWNER_APPROVE_TOKENS for t in tokens)
+            and not _OWNER_REJECT_DEFERRAL.search(body)
+            and not _OWNER_REJECT_NEGATOR.search(body[:reject_match.start()])):
+        return "reject"
+    return None
+
 # Shift coverage verbs are scoped to the POOL_SHIFT branch because the Shift
 # owner card asks for a DIFFERENT grammar than the catering card does:
 #
@@ -1646,6 +1725,50 @@ def _try_revenue_route_clarification_start(
     return {"action": "skip", "reason": "cf-router revenue route clarification sent"}
 
 
+# Fixed owner text for an approval-card reply that named a decision but not a
+# clear one. Filled only from the regex-bounded code and per-pool verb words.
+_OWNER_UNCLEAR_VERB_REPROMPT = (
+    'I did not act on {code} — your reply was not a clear {approve} or {reject}. '
+    'Reply "{code} {approve}" to {effect}, or "{code} {reject}" to decline.')
+
+
+def _reprompt_unclear_owner_verb(
+    *, text: str, chat_id: str, code: str, has_edit: bool,
+    approve_word: str, reject_word: str, approve_effect: str,
+) -> Optional[dict]:
+    """The "code matched, verdict unclear" arm of the menu, catering-lead and
+    follow-up pools. Before this, the turn fell through to the LLM, which cannot
+    act on the box (actions.invoke_apply_owner_decision, Path 3 note), so an
+    owner who wrote "ok but later" heard nothing at all.
+
+    Reprompt only when the owner TRIED to decide (an approve or reject word is
+    present) and is not editing; a bare code keeps today's behaviour. The turn
+    ends ONLY when the reprompt was delivered — if the bridge refused it nobody
+    was told, so fall through exactly as before. No audit row: no existing
+    CfRouterIntercepted.reason describes this, and a new value would be silently
+    dropped by the Literal (see the R2.H2 note in the catering-leads arm).
+    """
+    if has_edit or not _owner_reply_attempted_decision(text):
+        return None
+    reply = _OWNER_UNCLEAR_VERB_REPROMPT.format(
+        code=code, approve=approve_word, reject=reject_word, effect=approve_effect)
+    ack_ok, _mid, _err = actions.send_flyer_text(
+        chat_id,
+        reply,
+        action_context=build_action_context(
+            action_id="catering.owner_decision.unclear_verb_reprompt",
+            is_regulated_action=False,
+        ),
+        # A second unclear reply inside the outbound dedupe window must be
+        # answered again, not deduped into another silent skip.
+        allow_duplicate=True,
+    )
+    if not ack_ok:
+        return None
+    return {"action": "skip",
+            "reason": f"cf-router F8: unclear owner verb for {code}; owner reprompted"}
+
+
 def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional[dict]:
     """Owner sent something in self-chat. Look for #XXXXX + verb.
 
@@ -1662,9 +1785,12 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
 
     code = "#" + code_match.group(1).upper()
 
-    # Determine verb intent
-    has_approve = bool(_VERB_APPROVE.search(text))
-    has_reject = bool(_VERB_REJECT.search(text))
+    # Determine verb intent. approve/reject come ONLY from _owner_verb_verdict,
+    # which approves only a reply made of nothing but approve words (+ fillers)
+    # — a wrong approve is an irreversible customer send (see its docstring).
+    verdict = _owner_verb_verdict(text)
+    has_approve = verdict == "approve"
+    has_reject = verdict == "reject"
     has_edit = bool(_VERB_EDIT.search(text))
 
     # PR-R1: resolve the code through the centralized pool registry, in the
@@ -1702,7 +1828,9 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
                 reason="f8_menu_no", detail="",
                 action_label=f"apply-menu-update no for {code}",
             )
-        return None
+        return _reprompt_unclear_owner_verb(
+            text=text, chat_id=chat_id, code=code, has_edit=has_edit,
+            approve_word="yes", reject_word="no", approve_effect="apply it")
 
     if pool_name == approval_code_pools.POOL_CATERING_LEADS:
         lead = row
@@ -1760,8 +1888,11 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
                 detail=f"lead status was {lead_status}",
                 action_label=f"apply-owner-decision reject for {code}",
             )
-        # Code matched but no clear verb — let LLM ask for clarification
-        return None
+        # Code matched but no clear verb. The LLM fallback cannot act on the
+        # box, so if the owner tried to decide, tell them deterministically.
+        return _reprompt_unclear_owner_verb(
+            text=text, chat_id=chat_id, code=code, has_edit=has_edit,
+            approve_word="approve", reject_word="reject", approve_effect="send it")
 
     if pool_name == approval_code_pools.POOL_CATERING_FOLLOWUPS:
         # M5: the owner is answering a follow-up approval card. Without this
@@ -1789,7 +1920,9 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
                 detail=f"followup status was {followup_status}",
                 action_label=f"approve-catering-followup cancel for {code}",
             )
-        return None
+        return _reprompt_unclear_owner_verb(
+            text=text, chat_id=chat_id, code=code, has_edit=has_edit,
+            approve_word="approve", reject_word="reject", approve_effect="send it")
 
     if pool_name == approval_code_pools.POOL_SHIFT:
         return _handle_shift_coverage_code(
