@@ -1723,8 +1723,15 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
             rc = actions.invoke_apply_owner_decision(
                 code, "approve", lead=lead, message_id=message_id, capture=cap)
             payload = cap.get("payload") or {}
-            if rc == _EXIT_TRUTH_GUARD_FAILED and payload.get(
-                    "refusal") == "owner_approve_without_customer_finalize":
+            # Both refusals reprompt the owner from the apply-script itself and
+            # report it in `owner_reprompt_delivered`; the value is the phrase
+            # used in the audit detail and the skip reason.
+            refusal_label = {
+                "owner_approve_without_customer_finalize": "not customer-finalized",
+                "quote_basis_headcount_mismatch":
+                    "guest count changed after customer finalize",
+            }.get(payload.get("refusal"))
+            if rc == _EXIT_TRUTH_GUARD_FAILED and refusal_label is not None:
                 informed = payload.get("owner_reprompt_delivered") is True
                 # reason MUST be a member of CfRouterIntercepted.reason, which is
                 # a Literal. A new value would fail validation inside
@@ -1737,13 +1744,13 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
                 actions.audit_intercepted(
                     reason="f8_owner_approve",
                     chat_id=chat_id, code=code, subprocess_rc=rc,
-                    detail=("refused: not customer-finalized; owner reprompt "
+                    detail=(f"refused: {refusal_label}; owner reprompt "
                             + ("DELIVERED" if informed else "NOT delivered")),
                 )
                 if informed:
                     return {"action": "skip",
                             "reason": ("cf-router F8: apply-owner-decision refused "
-                                       f"{code} (not customer-finalized); owner "
+                                       f"{code} ({refusal_label}); owner "
                                        "reprompted deterministically (rc=11)")}
                 return None
             return _build_skip_or_passthrough(

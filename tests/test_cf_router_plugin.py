@@ -4482,6 +4482,36 @@ class TestF8OwnerApproveNonFinalizedReachable:
             "an undelivered reprompt must not close the turn — that would claim "
             "the owner was informed when nothing reached them")
 
+    @pytest.mark.parametrize("delivered", [True, False])
+    def test_headcount_mismatch_refusal_is_terminal_only_when_owner_was_told(
+            self, mods, state_env, delivered):
+        """The quote-basis headcount refusal reprompts the owner the same way;
+        it closes the turn on the same condition, so the LLM does not answer a
+        second time — and stays open when the reprompt did not land."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE", status="CUSTOMER_FINALIZED")
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "quote_basis_headcount_mismatch",
+                    "priced_guest_count": 50, "current_headcount": 80,
+                    "owner_reprompt_delivered": delivered,
+                }
+            return 11
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        if delivered:
+            assert result is not None and result["action"] == "skip"
+            assert "guest count changed" in result["reason"]
+            assert "rc=11" in result["reason"]
+        else:
+            assert result is None
+
     def test_router_never_passes_skip_finalize(self, mods, state_env):
         """REQ 5 — the override stays operator/cockpit-only, never inferred from
         a WhatsApp reply. Asserted on the REAL wrapper's argv, not a mock."""
