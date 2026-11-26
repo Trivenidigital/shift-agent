@@ -206,4 +206,4 @@ jobs:
       # -v so every lifecycle and refusal cell reports its own PASSED line, and
       # -rs so a skip is printed with its reason rather than left as a bare 's'.
       - name: Catering lifecycle E2E — inquiry to delivered quote, plus refusals
-        run: python -m pytest -v -rs -p no:cacheprovider tests/e2e/test_catering_lifecycle_deterministic.py
+        run: python -m pytest -v -rs -p no:cacheprovider tests/e2e/test_catering_lifecycle_deterministic.py tests/e2e/test_catering_journeys_characterization.py
