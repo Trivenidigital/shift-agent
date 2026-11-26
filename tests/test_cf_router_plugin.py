@@ -701,6 +701,261 @@ class TestF8MenuYesNo:
         mock_apply.assert_called_once_with("#YDW6J", "no")
 
 
+# Owner replies that contain a verb word but do NOT clearly say one thing. The
+# old classifier tested the PRESENCE of an approve word before a reject word, so
+# every one of these that contains approve/yes/send/ok/go executed as APPROVE —
+# for catering-leads, an irreversible priced quote sent to the customer — and
+# "don't reject" executed a terminal reject. Each must now reach the apply
+# script NOT AT ALL. (Whether the owner is then reprompted is pinned separately
+# in TestF8UnclearOwnerVerbReprompt; here the reprompt send is stubbed to fail
+# so the intercept falls through to None exactly as before.)
+_F8_AMBIGUOUS_OWNER_REPLIES = (
+    "no, don't send yet",
+    "not ok",
+    "don't approve",
+    "do not send",
+    "cancel, do not send",
+    "yes but wait",
+    "ok hold on",
+    "don't reject",
+    "no wait, approve",
+    "don’t send",          # typographic apostrophe
+    "dont send",
+    "never send",
+    "send it? wait",
+    "go, then stop",
+    "approve once she cant",
+    "not rejected",
+    "never reject this",
+    # Conditional / deferred / question replies: an approve word is present but
+    # the owner has not consented to an immediate send.
+    "ok I'll check and get back",
+    "send me the details first",
+    "ok?",
+    "is this ok",
+    "should I send?",
+    "send it tomorrow",
+    "ok but later",
+    "go ahead if they pay advance",
+    "ok, but lower the price to 500",
+    "send it, can't wait",
+    "yes, no changes needed",
+    # Reject-side deferrals and questions.
+    "no wait",
+    "no, not yet",
+    "no hold on",
+    "reject?",
+)
+
+# Unambiguous replies keep their exact pre-fix behaviour. (text, verb) where
+# verb is the apply-owner-decision verb; the menu pool maps approve->yes and
+# reject->no.
+_F8_UNAMBIGUOUS_OWNER_REPLIES = (
+    ("{code} approve", "approve"),
+    ("{code} approved", "approve"),
+    ("{code} yes", "approve"),
+    ("{code} send it", "approve"),
+    ("{code} ok", "approve"),
+    ("{code} go", "approve"),
+    ("approve {code}", "approve"),
+    ("{code} yes go ahead", "approve"),
+    ("{code} ok send it now", "approve"),
+    ("{code} approved, looks good", "approve"),
+    ("{code} send it to the customer", "approve"),
+    ("approve {code} please", "approve"),
+    ("{code} reject", "reject"),
+    ("{code} no", "reject"),
+    ("{code} no looks wrong", "reject"),
+    ("{code} cancel", "reject"),
+    ("{code} pass", "reject"),
+    # A negator AFTER the reject verb is the owner's reason, not a cancellation.
+    ("{code} reject not interested", "reject"),
+    ("{code} no, not this one", "reject"),
+)
+
+
+def _failed_reprompt_send(actions_mod):
+    return patch.object(actions_mod, "send_flyer_text",
+                        return_value=(False, "", "bridge down"))
+
+
+class TestF8ConflictingOwnerVerbs:
+    """Approve is "absence of everything else": after the code and a small
+    filler set are removed, the reply must be non-empty, contain no `?`, and
+    consist ONLY of approve tokens. Reject stays presence-based but is cancelled
+    by an approve token, a `?`, wait/yet/hold/later anywhere, or a
+    not/don't/never BEFORE the reject verb. Everything else is "code matched but
+    no clear verb" — the apply script is never invoked."""
+
+    @pytest.mark.parametrize("reply", _F8_AMBIGUOUS_OWNER_REPLIES)
+    def test_catering_lead_ambiguous_reply_invokes_nothing(self, mods, state_env, reply):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision",
+                          return_value=0) as mock_apply, \
+                _failed_reprompt_send(actions_mod):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(f"#ABCDE {reply}", "15550100002@s.whatsapp.net"))
+        assert result is None, reply
+        mock_apply.assert_not_called()
+
+    @pytest.mark.parametrize("reply", _F8_AMBIGUOUS_OWNER_REPLIES)
+    def test_menu_pending_ambiguous_reply_invokes_nothing(self, mods, state_env, reply):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_menu_pending(state_env, code="#YDW6J")
+        with patch.object(actions_mod, "invoke_apply_menu_update",
+                          return_value=0) as mock_apply, \
+                _failed_reprompt_send(actions_mod):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(f"#YDW6J {reply}", "15550100002@s.whatsapp.net"))
+        assert result is None, reply
+        mock_apply.assert_not_called()
+
+    @pytest.mark.parametrize("template,verb", _F8_UNAMBIGUOUS_OWNER_REPLIES)
+    def test_catering_lead_unambiguous_reply_unchanged(
+            self, mods, state_env, template, verb):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision",
+                          return_value=0) as mock_apply:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(template.format(code="#ABCDE"),
+                            "15550100002@s.whatsapp.net"))
+        assert result is not None and result["action"] == "skip"
+        mock_apply.assert_called_once()
+        assert mock_apply.call_args.args[:2] == ("#ABCDE", verb)
+
+    @pytest.mark.parametrize("template,verb", _F8_UNAMBIGUOUS_OWNER_REPLIES)
+    def test_menu_pending_unambiguous_reply_unchanged(
+            self, mods, state_env, template, verb):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_menu_pending(state_env, code="#YDW6J")
+        with patch.object(actions_mod, "invoke_apply_menu_update",
+                          return_value=0) as mock_apply:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(template.format(code="#YDW6J"),
+                            "15550100002@s.whatsapp.net"))
+        assert result is not None and result["action"] == "skip"
+        mock_apply.assert_called_once_with(
+            "#YDW6J", {"approve": "yes", "reject": "no"}[verb])
+
+    @pytest.mark.parametrize("reply,expected", [
+        ("approve", "approve"),
+        ("👍", "approve"),
+        ("okay please", "approve"),
+        ("no looks wrong", "reject"),
+        ("no, don't send yet", None),
+        ("don't reject", None),
+        ("reject not interested", "reject"),
+        ("hold", None),
+        ("", None),
+        ("please", None),
+        ("confirm", None),
+    ])
+    def test_owner_verb_verdict_rule(self, mods, reply, expected):
+        hooks_mod, _ = mods
+        assert hooks_mod._owner_verb_verdict(f"#ABCDE {reply}") == expected
+
+
+_LEAD_REPROMPT = ('I did not act on #ABCDE — your reply was not a clear approve or '
+                  'reject. Reply "#ABCDE approve" to send it, or "#ABCDE reject" '
+                  'to decline.')
+
+
+class TestF8UnclearOwnerVerbReprompt:
+    """When the owner tried to decide (an approve or reject word is present) but
+    the verdict is unclear, a fixed reprompt is sent to the owner chat. The LLM
+    fallback cannot act on the box, so falling through alone left the owner in
+    silence. The turn ends (skip) ONLY when the reprompt was delivered."""
+
+    def test_lead_reprompt_sent_once_and_turn_skipped(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "mid-1", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event("#ABCDE ok but later", OWNER_JID))
+        mock_apply.assert_not_called()
+        mock_send.assert_called_once()
+        assert mock_send.call_args.args == (OWNER_JID, _LEAD_REPROMPT)
+        ctx = mock_send.call_args.kwargs["action_context"]
+        assert ctx.is_regulated_action is False
+        assert result is not None and result["action"] == "skip"
+
+    def test_menu_reprompt_uses_yes_no(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_menu_pending(state_env, code="#YDW6J")
+        with patch.object(actions_mod, "invoke_apply_menu_update") as mock_apply, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "mid-1", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event("#YDW6J yes but wait", OWNER_JID))
+        mock_apply.assert_not_called()
+        mock_send.assert_called_once()
+        assert mock_send.call_args.args == (
+            OWNER_JID,
+            'I did not act on #YDW6J — your reply was not a clear yes or no. '
+            'Reply "#YDW6J yes" to apply it, or "#YDW6J no" to decline.')
+        assert result is not None and result["action"] == "skip"
+
+    def test_reprompt_send_failure_falls_through(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(False, "", "503: bridge down")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event("#ABCDE don't reject", OWNER_JID))
+        mock_apply.assert_not_called()
+        mock_send.assert_called_once()
+        assert result is None
+
+    @pytest.mark.parametrize("text", ["#ABCDE", "#ABCDE confirm please"])
+    def test_no_reprompt_without_any_verb_word(self, mods, state_env, text):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply, \
+             patch.object(actions_mod, "send_flyer_text") as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(_make_event(text, OWNER_JID))
+        assert result is None
+        mock_apply.assert_not_called()
+        mock_send.assert_not_called()
+
+    def test_no_reprompt_for_edit_reply(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply, \
+             patch.object(actions_mod, "send_flyer_text") as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event("#ABCDE change the date, then send", OWNER_JID))
+        assert result is None
+        mock_apply.assert_not_called()
+        mock_send.assert_not_called()
+
+    def test_no_reprompt_for_shift_pool(self, mods, state_env, shift_calls):
+        hooks_mod, actions_mod = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+        with patch.object(actions_mod, "send_flyer_text") as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event("#SHFT2 ok but later", OWNER_JID))
+        assert result is None
+        transition.assert_not_called()
+        send.assert_not_called()
+        mock_send.assert_not_called()
+
+
 # ============================================================================
 # F9 — sick-call alert
 # ============================================================================
